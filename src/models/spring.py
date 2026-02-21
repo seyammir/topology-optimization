@@ -24,8 +24,8 @@ class Spring:
     k : float | None
         Spring constant [N/m].  If *None* the value is inferred
         automatically:
-        * horizontal / vertical → ``1.0``
-        * diagonal (45°)       → ``1 / sqrt(2)``
+        * horizontal / vertical -> ``1.0``
+        * diagonal (45°)       -> ``1 / sqrt(2)``
     """
 
     def __init__(self, node_i: Node, node_j: Node, k: float | None = None) -> None:
@@ -40,7 +40,7 @@ class Spring:
         if k is not None:
             self.k = k
         else:
-            # Auto-detect: if both dx and dz are non-zero → diagonal
+            # Auto-detect: if both dx and dz are non-zero -> diagonal
             if dx != 0 and dz != 0:
                 self.k = 1.0 / math.sqrt(2)
             else:

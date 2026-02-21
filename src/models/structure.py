@@ -25,15 +25,15 @@ class Structure:
     The graph is stored in ``self.graph`` (a ``networkx.Graph``).
 
     * Graph-node keys are **node ids** (``int``).
-    * Graph-node attribute ``"obj"`` → the :class:`Node` instance.
-    * Graph-edge attribute ``"obj"`` → the :class:`Spring` instance.
+    * Graph-node attribute ``"obj"`` -> the :class:`Node` instance.
+    * Graph-edge attribute ``"obj"`` -> the :class:`Spring` instance.
     """
 
     def __init__(self) -> None:
         self.graph: nx.Graph = nx.Graph()
         self._next_node_id: int = 0
 
-    # Factory – rectangular grid
+    # Factory - rectangular grid
     @classmethod
     def create_rectangular(cls, width: int, height: int) -> "Structure":
         """Create a rectangular grid of ``(width+1) x (height+1)`` nodes.
@@ -70,7 +70,7 @@ class Structure:
         cols = width + 1
         rows = height + 1
 
-        # 1) Create nodes row by row (top → bottom).
+        # 1) Create nodes row by row (top -> bottom).
         node_map: dict[tuple[int, int], Node] = {}
         for iz in range(rows):
             for ix in range(cols):
@@ -311,7 +311,7 @@ class Structure:
                     # neighbour of ap (those are the ones that got split)
                     if not comp & neighbour_ids:
                         continue
-                    # If the component has no protected node → dangling
+                    # If the component has no protected node -> dangling
                     if not comp & protected:
                         dangling_ids |= comp
 
@@ -352,7 +352,7 @@ class Structure:
         if not support_ids or not load_ids:
             return False  # nothing to check
         for lid in load_ids:
-            # BFS / DFS from load node – does it reach any support?
+            # BFS / DFS from load node - does it reach any support?
             reachable = nx.node_connected_component(self.graph, lid)
             if not reachable & support_ids:
                 return False

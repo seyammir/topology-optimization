@@ -1,6 +1,6 @@
 """Node (mass point) in the mass-spring system.
 
-Coordinate system: origin top-left, x → right, z → down.
+Coordinate system: origin top-left, x -> right, z -> down.
 Each node carries 2 DOFs (u_x, u_z), optional boundary conditions and
 external forces.
 """

@@ -18,23 +18,23 @@ class TestStructureCreation:
         assert s.num_dofs == 0
 
     def test_rectangular_node_count(self, rect_2x1):
-        # 2×1 grid → (2+1)×(1+1) = 6 nodes
+        # 2x1 grid -> (2+1)x(1+1) = 6 nodes
         assert rect_2x1.num_nodes == 6
 
     def test_rectangular_dof_count(self, rect_2x1):
         assert rect_2x1.num_dofs == 12
 
     def test_rectangular_spring_count(self, rect_2x1):
-        # 2×1 grid: 2 cells
+        # 2x1 grid: 2 cells
         # Horizontal: 2*2 = 4, Vertical: 3*1 = 3, Diag: 2*2 = 4
-        # Actually: horiz per row = 2, rows = 2 → 4; vert per col = 1, cols = 3 → 3
-        # Diags: 2 cells × 2 diags = 4
+        # Actually: horiz per row = 2, rows = 2 -> 4; vert per col = 1, cols = 3 -> 3
+        # Diags: 2 cells x 2 diags = 4
         # Total = 4 + 3 + 4 = 11
         springs = rect_2x1.get_springs()
         assert len(springs) == 11
 
     def test_rectangular_larger(self, rect_3x2):
-        # 3×2 → (4)×(3) = 12 nodes
+        # 3x2 -> (4)x(3) = 12 nodes
         assert rect_3x2.num_nodes == 12
 
 
@@ -117,7 +117,7 @@ class TestDOFManagement:
         n0 = s.add_node(0.0, 0.0)
         n1 = s.add_node(1.0, 0.0)
         s.renumber_dofs()
-        # Nodes sorted by id: 0 → (0,1), 1 → (2,3)
+        # Nodes sorted by id: 0 -> (0,1), 1 -> (2,3)
         assert n0.dof_indices == (0, 1)
         assert n1.dof_indices == (2, 3)
 
@@ -130,7 +130,7 @@ class TestDOFManagement:
         s.add_spring(n1, n2)
         s.remove_node(n1.id)
         s.renumber_dofs()
-        # Only n0 and n2 remain, sorted → (0,1) and (2,3)
+        # Only n0 and n2 remain, sorted -> (0,1) and (2,3)
         assert n0.dof_indices == (0, 1)
         assert n2.dof_indices == (2, 3)
 
@@ -146,7 +146,7 @@ class TestTopologyQueries:
         assert s.is_connected() is False
 
     def test_total_mass(self, rect_2x1):
-        # 6 nodes × default mass 1.0 = 6.0
+        # 6 nodes x default mass 1.0 = 6.0
         assert rect_2x1.total_mass() == pytest.approx(6.0)
 
     def test_protected_node_ids(self, cantilever_beam):
@@ -184,7 +184,7 @@ class TestMechanismDetection:
         assert s.has_mechanism() is True
 
     def test_collinear_springs_mechanism(self):
-        """Three nodes in a line — middle node is a mechanism."""
+        """Three nodes in a line - middle node is a mechanism."""
         s = Structure()
         n0 = s.add_node(0.0, 0.0)
         n1 = s.add_node(1.0, 0.0)
@@ -203,7 +203,7 @@ class TestMechanismDetection:
         n1 = s.add_node(1.0, 0.0)
         s.add_spring(n0, n1)
         s.renumber_dofs()
-        # n0 is pinned, so not a mechanism. n1 has 1 spring → mechanism
+        # n0 is pinned, so not a mechanism. n1 has 1 spring -> mechanism
         assert s.node_is_mechanism(n0.id) is False
         assert s.node_is_mechanism(n1.id) is True
 

@@ -58,7 +58,7 @@ class TestStiffnessMatrix:
     """Test the local (global-coordinate) stiffness matrix."""
 
     def test_horizontal_spring_matrix(self, horizontal_spring):
-        """For θ=0: c=1, s=0 → only the x-x entries are non-zero."""
+        """For θ=0: c=1, s=0 -> only the x-x entries are non-zero."""
         n0 = horizontal_spring.node_i
         n1 = horizontal_spring.node_j
         n0.dof_indices = (0, 1)
@@ -77,7 +77,7 @@ class TestStiffnessMatrix:
         np.testing.assert_array_almost_equal(ke, expected)
 
     def test_vertical_spring_matrix(self):
-        """For θ=π/2: c=0, s=1 → only the z-z entries are non-zero."""
+        """For θ=π/2: c=0, s=1 -> only the z-z entries are non-zero."""
         n0 = Node(id=0, x=0.0, z=0.0)
         n1 = Node(id=1, x=0.0, z=1.0)
         sp = Spring(n0, n1)
