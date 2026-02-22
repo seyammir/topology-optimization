@@ -19,7 +19,11 @@ Optionally the left-half symmetry model can be created:
 
 from __future__ import annotations
 
+import logging
+
 from ..models.structure import Structure
+
+logger = logging.getLogger(__name__)
 
 
 def create_mbb_beam(
@@ -48,7 +52,17 @@ def create_mbb_beam(
     Returns
     -------
     Structure
+
+    Raises
+    ------
+    ValueError
+        If *nx* or *nz* is less than 1, or *load* is zero.
     """
+    if nx < 1 or nz < 1:
+        raise ValueError(f"nx and nz must be ≥ 1, got nx={nx}, nz={nz}")
+    if load == 0.0:
+        raise ValueError("Load must be non-zero for a meaningful MBB beam")
+
     struct = Structure.create_rectangular(nx, nz)
 
     cols = nx + 1
@@ -84,4 +98,9 @@ def create_mbb_beam(
         tc = struct.get_node(_nid(mid_x, 0))
         tc.fz = abs(load)  # positive -> downward
 
+    mode = "half-symmetry" if half else "full"
+    logger.info(
+        "Created MBB beam (%s): nx=%d, nz=%d, load=%.2f, nodes=%d",
+        mode, nx, nz, load, struct.num_nodes,
+    )
     return struct

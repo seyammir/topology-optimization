@@ -6,12 +6,15 @@ using the standard rotation/transformation approach for a 2-D bar element.
 
 from __future__ import annotations
 
+import logging
 import math
 from typing import Any
 
 import numpy as np
 
 from .node import Node
+
+logger = logging.getLogger(__name__)
 
 
 class Spring:
@@ -29,15 +32,28 @@ class Spring:
     """
 
     def __init__(self, node_i: Node, node_j: Node, k: float | None = None) -> None:
+        if node_i.id == node_j.id:
+            raise ValueError(
+                f"Cannot create spring: both ends refer to node {node_i.id}"
+            )
         self.node_i = node_i
         self.node_j = node_j
 
         dx = node_j.x - node_i.x
         dz = node_j.z - node_i.z
         self._length = math.hypot(dx, dz)
+        if self._length == 0.0:
+            logger.warning(
+                "Zero-length spring between nodes %d and %d at (%.2f, %.2f)",
+                node_i.id, node_j.id, node_i.x, node_i.z,
+            )
         self._angle = math.atan2(dz, dx)  # radians
 
         if k is not None:
+            if k <= 0.0:
+                raise ValueError(
+                    f"Spring stiffness must be positive, got k={k}"
+                )
             self.k = k
         else:
             # Auto-detect: if both dx and dz are non-zero -> diagonal

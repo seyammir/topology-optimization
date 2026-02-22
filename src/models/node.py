@@ -7,8 +7,11 @@ external forces.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -96,17 +99,30 @@ class Node:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> Node:
-        """Reconstruct a :class:`Node` from a dict."""
-        return cls(
-            id=data["id"],
-            x=data["x"],
-            z=data["z"],
-            mass=data.get("mass", 1.0),
-            fixed_x=data.get("fixed_x", False),
-            fixed_z=data.get("fixed_z", False),
-            fx=data.get("fx", 0.0),
-            fz=data.get("fz", 0.0),
+        """Reconstruct a :class:`Node` from a dict.
+
+        Raises
+        ------
+        KeyError
+            If required fields (``id``, ``x``, ``z``) are missing.
+        TypeError
+            If field values have unexpected types.
+        """
+        for key in ("id", "x", "z"):
+            if key not in data:
+                raise KeyError(f"Missing required field '{key}' in node data")
+        node = cls(
+            id=int(data["id"]),
+            x=float(data["x"]),
+            z=float(data["z"]),
+            mass=float(data.get("mass", 1.0)),
+            fixed_x=bool(data.get("fixed_x", False)),
+            fixed_z=bool(data.get("fixed_z", False)),
+            fx=float(data.get("fx", 0.0)),
+            fz=float(data.get("fz", 0.0)),
         )
+        logger.debug("Loaded node %d at (%.2f, %.2f)", node.id, node.x, node.z)
+        return node
 
     # Dunder helpers
     def __hash__(self) -> int:
