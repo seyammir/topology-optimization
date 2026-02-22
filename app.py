@@ -7,12 +7,18 @@ Run with:
 from __future__ import annotations
 
 import json
+import logging
+import logging.handlers
+import sys
 import time
+from pathlib import Path
+from typing import Any
 
 import matplotlib.pyplot as plt
 import numpy as np
 import streamlit as st
 
+from src import __version__
 from src.models.node import Node
 from src.models.structure import Structure
 from src.solver.fem_solver import FEMSolver
@@ -21,11 +27,55 @@ from src.utils.io_handler import state_to_json_string, structure_from_json_strin
 from src.utils.visualization import Visualizer
 from src.presets.mbb_beam import create_mbb_beam
 
+# ---------------------------------------------------------------------------
+# Logging configuration
+# ---------------------------------------------------------------------------
+_LOG_DIR = Path("logs")
+_LOG_DIR.mkdir(exist_ok=True)
+_LOG_FMT = "%(asctime)s  %(levelname)-8s  %(name)s — %(message)s"
+_LOG_DATE = "%Y-%m-%d %H:%M:%S"
+
+logging.basicConfig(
+    level=logging.INFO,
+    format=_LOG_FMT,
+    datefmt=_LOG_DATE,
+    handlers=[
+        logging.StreamHandler(sys.stderr),
+        logging.handlers.RotatingFileHandler(
+            _LOG_DIR / "app.log",
+            maxBytes=5 * 1024 * 1024,  # 5 MB per file
+            backupCount=3,
+            encoding="utf-8",
+        ),
+    ],
+)
+logger = logging.getLogger(__name__)
+
 # Page config
 st.set_page_config(
-    page_title="Topology Optimization",
+    page_title="Topology Optimization v" + __version__,
     page_icon="🏗️",
     layout="wide",
+)
+
+# ---------------------------------------------------------------------------
+# Custom CSS for a cleaner look
+# ---------------------------------------------------------------------------
+st.markdown(
+    """
+    <style>
+    /* Tighten metrics row spacing (theme-aware) */
+    div[data-testid="stMetric"] {
+        background: color-mix(in srgb, var(--default-textColor) 6%, transparent);
+        border: 1px solid color-mix(in srgb, var(--default-textColor) 12%, transparent);
+        border-radius: 8px;
+        padding: 10px 14px;
+    }
+    /* Tab content padding */
+    div[data-testid="stTab"] > div { padding-top: 0.5rem; }
+    </style>
+    """,
+    unsafe_allow_html=True,
 )
 
 # Session-state initialisation
@@ -89,14 +139,19 @@ with st.sidebar:
     if st.button("🔨 Create Structure", use_container_width=True):
         _reset_state()
         st.session_state.editor_gen += 1  # invalidate old editor widget keys
-        if preset == "MBB Beam":
-            struct = create_mbb_beam(nx=width, nz=height, half=False)
-        elif preset == "MBB Beam (half)":
-            struct = create_mbb_beam(nx=width, nz=height, half=True)
-        else:
-            struct = Structure.create_rectangular(width, height)
-        st.session_state.structure = struct
-        st.session_state.initial_structure = struct.snapshot()
+        try:
+            if preset == "MBB Beam":
+                struct = create_mbb_beam(nx=width, nz=height, half=False)
+            elif preset == "MBB Beam (half)":
+                struct = create_mbb_beam(nx=width, nz=height, half=True)
+            else:
+                struct = Structure.create_rectangular(width, height)
+            st.session_state.structure = struct
+            st.session_state.initial_structure = struct.snapshot()
+            logger.info("Created structure: preset=%s, %dx%d", preset, width, height)
+        except (ValueError, RuntimeError) as exc:
+            logger.exception("Failed to create structure")
+            st.error(f"Could not create structure: {exc}")
 
     # Save / Load
     st.divider()
@@ -104,14 +159,18 @@ with st.sidebar:
 
     # Download
     if st.session_state.structure is not None:
-        json_str = state_to_json_string(st.session_state.structure)
-        st.download_button(
-            "⬇️ Download State (JSON)",
-            data=json_str,
-            file_name="topology_state.json",
-            mime="application/json",
-            use_container_width=True,
-        )
+        try:
+            json_str = state_to_json_string(st.session_state.structure)
+            st.download_button(
+                "⬇️ Download State (JSON)",
+                data=json_str,
+                file_name="topology_state.json",
+                mime="application/json",
+                use_container_width=True,
+            )
+        except Exception:
+            logger.exception("Failed to serialise structure for download")
+            st.error("Could not prepare the download. See logs for details.")
 
     # Upload
     uploaded = st.file_uploader("Load State (JSON)", type=["json"])
@@ -121,14 +180,29 @@ with st.sidebar:
             st.session_state.structure = structure_from_json_string(content)
             st.session_state.initial_structure = st.session_state.structure.snapshot()
             _reset_state()
-            st.success("State loaded!")
+            logger.info("State loaded from uploaded file")
+            st.success("State loaded successfully!")
+        except json.JSONDecodeError:
+            logger.exception("Uploaded file is not valid JSON")
+            st.error("The uploaded file is not valid JSON. Please check the file format.")
+        except KeyError as exc:
+            logger.exception("Uploaded JSON is missing required fields")
+            st.error(f"Invalid state file — missing data: {exc}")
         except Exception as exc:
-            st.error(f"Error loading: {exc}")
+            logger.exception("Unexpected error loading uploaded state")
+            st.error(f"Could not load state: {exc}")
+
+    # About
+    st.divider()
+    st.caption(f"**Topology Optimization** v{__version__}  \nMIT License")
 
 
 # MAIN AREA
 st.title("2-D Topology Optimization")
-st.caption("Mass-Spring Model  ·  Iterative Node Removal  ·  FEM Solver")
+st.caption(
+    "Mass-Spring Model  ·  Iterative Node Removal  ·  FEM Solver  ·  "
+    f"v{__version__}"
+)
 
 struct: Structure | None = st.session_state.structure
 
@@ -218,74 +292,104 @@ if do_reset and st.session_state.initial_structure is not None:
     st.rerun()
 
 if do_cleanup:
-    removed = struct.remove_dangling_nodes()
-    if removed > 0:
-        st.success(f"Removed {removed} dangling nodes.")
-        # Re-solve for updated displacements / energies
-        struct.renumber_dofs()
-        solver = FEMSolver()
-        u = solver.solve(struct)
-        st.session_state.displacement = u
-        st.session_state.node_energies = TopologyOptimizer._compute_node_energies(struct, u)
-    else:
-        st.info("No dangling nodes found.")
+    try:
+        removed = struct.remove_dangling_nodes()
+        if removed > 0:
+            st.success(f"Removed {removed} dangling nodes.")
+            logger.info("Removed %d dangling nodes", removed)
+            # Re-solve for updated displacements / energies
+            struct.renumber_dofs()
+            solver = FEMSolver()
+            u = solver.solve(struct)
+            st.session_state.displacement = u
+            st.session_state.node_energies = TopologyOptimizer._compute_node_energies(struct, u)
+        else:
+            st.info("No dangling nodes found.")
+    except Exception:
+        logger.exception("Error during dangling-node removal")
+        st.error("An error occurred while removing dangling nodes. Check logs for details.")
     st.rerun()
 
 # Full optimisation run
 if run_full:
-    optimizer = TopologyOptimizer(
-        target_mass_fraction=target_frac,
-        removal_per_iteration=removal_rate,
-        filter_radius=filter_radius,
-    )
-    progress_bar = st.progress(0.0)
-    status_text = st.empty()
-    initial_mass = struct.total_mass()
-    target_mass = target_frac * initial_mass
-
-    def _cb(s: Structure, it: int, ne: dict) -> None:
-        frac_done = 1.0 - (s.total_mass() - target_mass) / (initial_mass - target_mass)
-        frac_done = max(0.0, min(1.0, frac_done))
-        progress_bar.progress(frac_done)
-        status_text.text(
-            f"Iteration {it} — Nodes: {s.num_nodes}, "
-            f"Mass: {s.total_mass():.0f}/{target_mass:.0f}"
+    try:
+        optimizer = TopologyOptimizer(
+            target_mass_fraction=target_frac,
+            removal_per_iteration=removal_rate,
+            filter_radius=filter_radius,
         )
+        progress_bar = st.progress(0.0)
+        status_text = st.empty()
+        initial_mass = struct.total_mass()
+        target_mass = target_frac * initial_mass
 
-    result = optimizer.optimize(struct, callback=_cb)
-    progress_bar.progress(1.0)
-    status_text.text(
-        f"✅ Done after {result.iterations} iterations — "
-        f"{struct.num_nodes} nodes remaining."
-    )
-    st.session_state.result = result
+        def _cb(s: Structure, it: int, ne: dict[int, float]) -> None:
+            frac_done = 1.0 - (s.total_mass() - target_mass) / (initial_mass - target_mass)
+            frac_done = max(0.0, min(1.0, frac_done))
+            progress_bar.progress(frac_done)
+            status_text.text(
+                f"Iteration {it} — Nodes: {s.num_nodes}, "
+                f"Mass: {s.total_mass():.0f}/{target_mass:.0f}"
+            )
 
-    # Solve once more for final displacement.
-    struct.renumber_dofs()
-    solver = FEMSolver()
-    u = solver.solve(struct)
-    st.session_state.displacement = u
+        logger.info(
+            "Starting optimization: target=%.0f%%, removal_rate=%d, filter=%.1f",
+            target_frac * 100, removal_rate, filter_radius,
+        )
+        result = optimizer.optimize(struct, callback=_cb)
+        progress_bar.progress(1.0)
+        status_text.text(
+            f"✅ Done after {result.iterations} iterations — "
+            f"{struct.num_nodes} nodes remaining."
+        )
+        st.session_state.result = result
 
-    # Final node energies.
-    st.session_state.node_energies = TopologyOptimizer._compute_node_energies(struct, u)
+        # Solve once more for final displacement.
+        struct.renumber_dofs()
+        solver = FEMSolver()
+        u = solver.solve(struct)
+        st.session_state.displacement = u
 
+        # Final node energies.
+        st.session_state.node_energies = TopologyOptimizer._compute_node_energies(struct, u)
+        logger.info(
+            "Optimization complete: %d iterations, %d nodes remaining",
+            result.iterations, struct.num_nodes,
+        )
+    except ValueError as exc:
+        logger.exception("Invalid optimization parameters")
+        st.error(f"Invalid optimization parameters: {exc}")
+    except Exception:
+        logger.exception("Optimization failed")
+        st.error(
+            "An unexpected error occurred during optimization. "
+            "Please check the structure setup and try again."
+        )
     st.rerun()
 
 # Single step
 if run_step:
-    optimizer = TopologyOptimizer(
-        target_mass_fraction=target_frac,
-        removal_per_iteration=removal_rate,
-        filter_radius=filter_radius,
-    )
-    u, ne, removed = optimizer.step(struct)
-    st.session_state.displacement = u
-    st.session_state.node_energies = ne
-    st.session_state.iteration += 1
-    if removed == 0:
-        st.warning("No node could be removed.")
-    else:
-        st.success(f"Step {st.session_state.iteration}: {removed} nodes removed.")
+    try:
+        optimizer = TopologyOptimizer(
+            target_mass_fraction=target_frac,
+            removal_per_iteration=removal_rate,
+            filter_radius=filter_radius,
+        )
+        u, ne, removed = optimizer.step(struct)
+        st.session_state.displacement = u
+        st.session_state.node_energies = ne
+        st.session_state.iteration += 1
+        if removed == 0:
+            st.warning("No node could be removed — the structure may already be at its minimum.")
+        else:
+            st.success(f"Step {st.session_state.iteration}: {removed} nodes removed.")
+            logger.info("Single step %d: removed %d nodes", st.session_state.iteration, removed)
+    except ValueError as exc:
+        logger.exception("Invalid parameters for single step")
+        st.error(f"Invalid parameters: {exc}")
+    except Exception:
+        logger.exception("Single-step optimization failed")
+        st.error("An error occurred during the optimization step.")
     st.rerun()
 
 # Visualisation tabs
@@ -302,102 +406,122 @@ tab_init, tab_current, tab_deformed, tab_heatmap, tab_bw = st.tabs(
 
 with tab_init:
     if st.session_state.initial_structure is not None:
-        fig_init = Visualizer.plot_structure(
-            st.session_state.initial_structure, title="Initial Structure"
-        )
-        st.pyplot(fig_init)
+        try:
+            fig_init = Visualizer.plot_structure(
+                st.session_state.initial_structure, title="Initial Structure"
+            )
+            st.pyplot(fig_init)
 
-        st.write("")
-        png_init = Visualizer.fig_to_png_bytes(fig_init)
-        st.download_button(
-            "⬇️ Download Image (PNG)",
-            data=png_init,
-            file_name="initial_structure.png",
-            mime="image/png",
-            key="dl_init",
-        )
-        plt.close(fig_init)
+            st.write("")
+            png_init = Visualizer.fig_to_png_bytes(fig_init)
+            st.download_button(
+                "⬇️ Download Image (PNG)",
+                data=png_init,
+                file_name="initial_structure.png",
+                mime="image/png",
+                key="dl_init",
+            )
+            plt.close(fig_init)
+        except Exception:
+            logger.exception("Failed to render initial structure")
+            st.error("Could not render the initial structure plot.")
 
 with tab_current:
-    fig_cur = Visualizer.plot_structure(struct, title="Current Structure")
-    st.pyplot(fig_cur)
+    try:
+        fig_cur = Visualizer.plot_structure(struct, title="Current Structure")
+        st.pyplot(fig_cur)
 
-    st.write("")
-    png_bytes = Visualizer.fig_to_png_bytes(fig_cur)
-    st.download_button(
-        "⬇️ Download Image (PNG)",
-        data=png_bytes,
-        file_name="topology_result.png",
-        mime="image/png",
-        key="dl_cur",
-    )
-    plt.close(fig_cur)
+        st.write("")
+        png_bytes = Visualizer.fig_to_png_bytes(fig_cur)
+        st.download_button(
+            "⬇️ Download Image (PNG)",
+            data=png_bytes,
+            file_name="topology_result.png",
+            mime="image/png",
+            key="dl_cur",
+        )
+        plt.close(fig_cur)
+    except Exception:
+        logger.exception("Failed to render current structure")
+        st.error("Could not render the current structure plot.")
 
 with tab_deformed:
     u = st.session_state.displacement
     if u is not None:
-        auto_scale = st.checkbox("Auto Scaling", value=True, key="auto_scale")
-        if auto_scale:
-            fig_def = Visualizer.plot_structure(
-                struct, u=u, scale=0, title="Deformed Structure (auto-scaled)"
-            )
-        else:
-            scale = st.slider("Magnification Factor", 1.0, 500.0, 50.0, 1.0, key="def_scale")
-            fig_def = Visualizer.plot_structure(
-                struct, u=u, scale=scale, title="Deformed Structure"
-            )
-        st.pyplot(fig_def)
+        try:
+            auto_scale = st.checkbox("Auto Scaling", value=True, key="auto_scale")
+            if auto_scale:
+                fig_def = Visualizer.plot_structure(
+                    struct, u=u, scale=0, title="Deformed Structure (auto-scaled)"
+                )
+            else:
+                scale = st.slider("Magnification Factor", 1.0, 500.0, 50.0, 1.0, key="def_scale")
+                fig_def = Visualizer.plot_structure(
+                    struct, u=u, scale=scale, title="Deformed Structure"
+                )
+            st.pyplot(fig_def)
 
-        st.write("")
-        png_def = Visualizer.fig_to_png_bytes(fig_def)
-        st.download_button(
-            "⬇️ Download Image (PNG)",
-            data=png_def,
-            file_name="deformed_structure.png",
-            mime="image/png",
-            key="dl_def",
-        )
-        plt.close(fig_def)
+            st.write("")
+            png_def = Visualizer.fig_to_png_bytes(fig_def)
+            st.download_button(
+                "⬇️ Download Image (PNG)",
+                data=png_def,
+                file_name="deformed_structure.png",
+                mime="image/png",
+                key="dl_def",
+            )
+            plt.close(fig_def)
+        except Exception:
+            logger.exception("Failed to render deformed structure")
+            st.error("Could not render the deformation plot.")
     else:
         st.info("Run an optimization or a single step first.")
 
 with tab_heatmap:
     ne = st.session_state.node_energies
     if ne is not None:
-        fig_hm = Visualizer.plot_energy_heatmap(struct, ne, title="Strain Energy")
-        st.pyplot(fig_hm)
+        try:
+            fig_hm = Visualizer.plot_energy_heatmap(struct, ne, title="Strain Energy")
+            st.pyplot(fig_hm)
 
-        st.write("")
-        png_hm = Visualizer.fig_to_png_bytes(fig_hm)
-        st.download_button(
-            "⬇️ Download Image (PNG)",
-            data=png_hm,
-            file_name="strain_energy_heatmap.png",
-            mime="image/png",
-            key="dl_hm",
-        )
-        plt.close(fig_hm)
+            st.write("")
+            png_hm = Visualizer.fig_to_png_bytes(fig_hm)
+            st.download_button(
+                "⬇️ Download Image (PNG)",
+                data=png_hm,
+                file_name="strain_energy_heatmap.png",
+                mime="image/png",
+                key="dl_hm",
+            )
+            plt.close(fig_hm)
+        except Exception:
+            logger.exception("Failed to render energy heatmap")
+            st.error("Could not render the strain energy heatmap.")
     else:
         st.info("Run an optimization or a single step first.")
 
 with tab_bw:
-    fig_bw = Visualizer.plot_bw_density(
-        struct,
-        initial_structure=st.session_state.initial_structure,
-        title="Topology (Black & White)",
-    )
-    st.pyplot(fig_bw)
+    try:
+        fig_bw = Visualizer.plot_bw_density(
+            struct,
+            initial_structure=st.session_state.initial_structure,
+            title="Topology (Black & White)",
+        )
+        st.pyplot(fig_bw)
 
-    st.write("")
-    png_bw = Visualizer.fig_to_png_bytes(fig_bw)
-    st.download_button(
-        "⬇️ Download Image (PNG)",
-        data=png_bw,
-        file_name="topology_bw.png",
-        mime="image/png",
-        key="dl_bw",
-    )
-    plt.close(fig_bw)
+        st.write("")
+        png_bw = Visualizer.fig_to_png_bytes(fig_bw)
+        st.download_button(
+            "⬇️ Download Image (PNG)",
+            data=png_bw,
+            file_name="topology_bw.png",
+            mime="image/png",
+            key="dl_bw",
+        )
+        plt.close(fig_bw)
+    except Exception:
+        logger.exception("Failed to render B/W density plot")
+        st.error("Could not render the density plot.")
 
 # Compliance history chart (if full optimisation was run)
 result: OptimizationResult | None = st.session_state.result
@@ -415,47 +539,51 @@ if result is not None and result.compliance_history:
     change_pct = ((ch[-1] - ch[0]) / ch[0] * 100) if ch[0] != 0 else 0
     col_c4.metric("Change", f"{change_pct:+.1f}%")
 
-    # Matplotlib chart with proper styling
-    fig_ch, ax_ch = plt.subplots(figsize=(10, 4))
-    iterations = list(range(1, len(ch) + 1))
-    ax_ch.plot(iterations, ch, color="#2563eb", lw=2, marker="o", markersize=3)
-    ax_ch.fill_between(iterations, ch, alpha=0.08, color="#2563eb")
+    try:
+        # Matplotlib chart with proper styling
+        fig_ch, ax_ch = plt.subplots(figsize=(10, 4))
+        iterations = list(range(1, len(ch) + 1))
+        ax_ch.plot(iterations, ch, color="#2563eb", lw=2, marker="o", markersize=3)
+        ax_ch.fill_between(iterations, ch, alpha=0.08, color="#2563eb")
 
-    # Min / max markers
-    i_min = int(np.argmin(ch))
-    i_max = int(np.argmax(ch))
-    ax_ch.annotate(
-        f"Min: {ch[i_min]:.4g}",
-        xy=(i_min + 1, ch[i_min]),
-        xytext=(0, -18), textcoords="offset points",
-        fontsize=8, color="#16a34a", fontweight="bold", ha="center",
-        arrowprops=dict(arrowstyle="->", color="#16a34a", lw=1),
-    )
-    if i_max != i_min:
+        # Min / max markers
+        i_min = int(np.argmin(ch))
+        i_max = int(np.argmax(ch))
         ax_ch.annotate(
-            f"Max: {ch[i_max]:.4g}",
-            xy=(i_max + 1, ch[i_max]),
-            xytext=(0, 16), textcoords="offset points",
-            fontsize=8, color="#dc2626", fontweight="bold", ha="center",
-            arrowprops=dict(arrowstyle="->", color="#dc2626", lw=1),
+            f"Min: {ch[i_min]:.4g}",
+            xy=(i_min + 1, ch[i_min]),
+            xytext=(0, -18), textcoords="offset points",
+            fontsize=8, color="#16a34a", fontweight="bold", ha="center",
+            arrowprops=dict(arrowstyle="->", color="#16a34a", lw=1),
         )
+        if i_max != i_min:
+            ax_ch.annotate(
+                f"Max: {ch[i_max]:.4g}",
+                xy=(i_max + 1, ch[i_max]),
+                xytext=(0, 16), textcoords="offset points",
+                fontsize=8, color="#dc2626", fontweight="bold", ha="center",
+                arrowprops=dict(arrowstyle="->", color="#dc2626", lw=1),
+            )
 
-    ax_ch.set_xlabel("Iteration", fontsize=10)
-    ax_ch.set_ylabel("Compliance (total strain energy)", fontsize=10)
-    ax_ch.set_title("Compliance vs. Iteration", fontsize=13, fontweight="bold")
-    ax_ch.grid(True, linestyle="--", alpha=0.4)
-    ax_ch.set_xlim(1, max(len(ch), 2))
-    fig_ch.tight_layout()
+        ax_ch.set_xlabel("Iteration", fontsize=10)
+        ax_ch.set_ylabel("Compliance (total strain energy)", fontsize=10)
+        ax_ch.set_title("Compliance vs. Iteration", fontsize=13, fontweight="bold")
+        ax_ch.grid(True, linestyle="--", alpha=0.4)
+        ax_ch.set_xlim(1, max(len(ch), 2))
+        fig_ch.tight_layout()
 
-    st.pyplot(fig_ch)
+        st.pyplot(fig_ch)
 
-    st.write("")
-    png_ch = Visualizer.fig_to_png_bytes(fig_ch)
-    st.download_button(
-        "⬇️ Download Chart (PNG)",
-        data=png_ch,
-        file_name="compliance_history.png",
-        mime="image/png",
-        key="dl_compliance",
-    )
-    plt.close(fig_ch)
+        st.write("")
+        png_ch = Visualizer.fig_to_png_bytes(fig_ch)
+        st.download_button(
+            "⬇️ Download Chart (PNG)",
+            data=png_ch,
+            file_name="compliance_history.png",
+            mime="image/png",
+            key="dl_compliance",
+        )
+        plt.close(fig_ch)
+    except Exception:
+        logger.exception("Failed to render compliance history chart")
+        st.error("Could not render the compliance history chart.")

@@ -9,6 +9,7 @@ checks.
 from __future__ import annotations
 
 import copy
+import logging
 import math
 from typing import Any
 
@@ -17,6 +18,8 @@ import numpy as np
 
 from .node import Node
 from .spring import Spring
+
+logger = logging.getLogger(__name__)
 
 
 class Structure:
@@ -95,10 +98,14 @@ class Structure:
                     struct.add_spring(n, node_map[(ix - 1, iz + 1)])
 
         struct.renumber_dofs()
+        logger.info(
+            "Created rectangular structure: %dx%d (%d nodes, %d springs)",
+            width, height, struct.num_nodes, struct.graph.number_of_edges(),
+        )
         return struct
 
     # Node operations
-    def add_node(self, x: float, z: float, **kwargs) -> Node:
+    def add_node(self, x: float, z: float, **kwargs: Any) -> Node:
         """Add a new node and return it."""
         node = Node(id=self._next_node_id, x=x, z=z, **kwargs)
         self.graph.add_node(node.id, obj=node)
@@ -109,6 +116,7 @@ class Structure:
         """Remove a node *and* all incident springs from the graph."""
         if node_id not in self.graph:
             raise KeyError(f"Node {node_id} not in structure")
+        logger.debug("Removing node %d", node_id)
         self.graph.remove_node(node_id)  # also removes edges
 
     def get_node(self, node_id: int) -> Node:
@@ -372,7 +380,19 @@ class Structure:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "Structure":
-        """Reconstruct a :class:`Structure` from a serialised dict."""
+        """Reconstruct a :class:`Structure` from a serialised dict.
+
+        Raises
+        ------
+        KeyError
+            If required fields are missing.
+        ValueError
+            If the data references non-existent nodes.
+        """
+        if "nodes" not in data or "springs" not in data:
+            raise KeyError(
+                "Structure data must contain 'nodes' and 'springs' keys"
+            )
         struct = cls()
         node_lookup: dict[int, Node] = {}
         for nd in data["nodes"]:
@@ -382,11 +402,22 @@ class Structure:
             if node.id >= struct._next_node_id:
                 struct._next_node_id = node.id + 1
         for sd in data["springs"]:
-            ni = node_lookup[sd["node_i"]]
-            nj = node_lookup[sd["node_j"]]
+            ni_id = sd.get("node_i")
+            nj_id = sd.get("node_j")
+            if ni_id not in node_lookup or nj_id not in node_lookup:
+                logger.warning(
+                    "Skipping spring (%s, %s): node not found", ni_id, nj_id
+                )
+                continue
+            ni = node_lookup[ni_id]
+            nj = node_lookup[nj_id]
             spring = Spring(ni, nj, k=sd.get("k"))
             struct.graph.add_edge(ni.id, nj.id, obj=spring)
         struct.renumber_dofs()
+        logger.info(
+            "Loaded structure: %d nodes, %d springs",
+            struct.num_nodes, struct.graph.number_of_edges(),
+        )
         return struct
 
     # Dunder

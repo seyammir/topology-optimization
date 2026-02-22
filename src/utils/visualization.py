@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import logging
 
 import matplotlib
 matplotlib.use("Agg")  # non-interactive backend for Streamlit
@@ -12,6 +13,8 @@ import numpy as np
 from matplotlib.figure import Figure
 
 from ..models.structure import Structure
+
+logger = logging.getLogger(__name__)
 
 
 class Visualizer:
@@ -367,13 +370,34 @@ class Visualizer:
     # Export helpers
     @staticmethod
     def fig_to_png_bytes(fig: Figure) -> bytes:
-        """Render a matplotlib figure to PNG bytes (for download)."""
-        buf = io.BytesIO()
-        fig.savefig(buf, format="png", dpi=150, bbox_inches="tight")
-        buf.seek(0)
-        return buf.read()
+        """Render a matplotlib figure to PNG bytes (for download).
+
+        Raises
+        ------
+        RuntimeError
+            If the figure cannot be rendered.
+        """
+        try:
+            buf = io.BytesIO()
+            fig.savefig(buf, format="png", dpi=150, bbox_inches="tight")
+            buf.seek(0)
+            return buf.read()
+        except Exception:
+            logger.exception("Failed to render figure to PNG")
+            raise RuntimeError("Could not render the figure to PNG") from None
 
     @staticmethod
     def export_image(fig: Figure, path: str) -> None:
-        """Save figure to disk."""
-        fig.savefig(path, dpi=150, bbox_inches="tight")
+        """Save figure to disk.
+
+        Raises
+        ------
+        OSError
+            If the file cannot be written.
+        """
+        try:
+            fig.savefig(path, dpi=150, bbox_inches="tight")
+            logger.info("Exported image to %s", path)
+        except OSError:
+            logger.exception("Failed to export image to %s", path)
+            raise
