@@ -147,7 +147,7 @@ with st.sidebar:
     )
 
     # Create / preset buttons
-    if st.button("🔨 Create Structure", use_container_width=True):
+    if st.button("🔨 Create Structure", width='stretch'):
         _reset_state()
         st.session_state.editor_gen += 1  # invalidate old editor widget keys
         try:
@@ -177,7 +177,7 @@ with st.sidebar:
                 data=json_str,
                 file_name="topology_state.json",
                 mime="application/json",
-                use_container_width=True,
+                width='stretch',
             )
         except Exception:
             logger.exception("Failed to serialise structure for download")
@@ -294,7 +294,7 @@ with st.sidebar:
         key=f"canvas_{st.session_state.canvas_key}",
     )
 
-    if st.button("🎨 Apply Drawing", use_container_width=True):
+    if st.button("🎨 Apply Drawing", width='stretch'):
         if canvas_result.image_data is not None:
             try:
                 from PIL import Image as PILImage
@@ -413,13 +413,13 @@ col_m4.metric("Mass Fraction", f"{frac:.1%}")
 st.divider()
 ctrl_cols = st.columns([1, 1, 1, 1])
 with ctrl_cols[0]:
-    run_full = st.button("▶️ Start Optimization", use_container_width=True)
+    run_full = st.button("▶️ Start Optimization", width='stretch')
 with ctrl_cols[1]:
-    run_step = st.button("⏩ Single Step", use_container_width=True)
+    run_step = st.button("⏩ Single Step", width='stretch')
 with ctrl_cols[2]:
-    do_reset = st.button("🔄 Reset", use_container_width=True)
+    do_reset = st.button("🔄 Reset", width='stretch')
 with ctrl_cols[3]:
-    do_cleanup = st.button("🧹 Remove Dangling", use_container_width=True,
+    do_cleanup = st.button("🧹 Remove Dangling", width='stretch',
                            help="Iteratively remove dead-end nodes that don't carry load.")
 
 if do_reset and st.session_state.initial_structure is not None:
@@ -710,7 +710,7 @@ if result is not None and len(result.history) > 1:
 
     mode_key = "bw" if anim_mode == "B/W Density" else "structure"
 
-    if st.button("🎞️ Generate Animation (GIF)", use_container_width=False, key="gen_anim"):
+    if st.button("🎞️ Generate Animation (GIF)", width='content', key="gen_anim"):
         try:
             with st.spinner("Rendering animation frames…"):
                 gif_bytes = Visualizer.create_animation_gif(
@@ -726,7 +726,7 @@ if result is not None and len(result.history) > 1:
             st.error("Could not create the animation. Check logs for details.")
 
     if "animation_gif" in st.session_state and st.session_state["animation_gif"] is not None:
-        st.image(st.session_state["animation_gif"], caption="Optimization Animation", use_container_width=True)
+        st.image(st.session_state["animation_gif"], caption="Optimization Animation", width='stretch')
         st.download_button(
             "⬇️ Download Animation (GIF)",
             data=st.session_state["animation_gif"],
