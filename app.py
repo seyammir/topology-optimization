@@ -530,12 +530,13 @@ if run_step:
 
 # Visualisation tabs
 st.divider()
-tab_init, tab_current, tab_deformed, tab_heatmap, tab_bw = st.tabs(
+tab_init, tab_current, tab_deformed, tab_heatmap, tab_loadpath, tab_bw = st.tabs(
     [
         "📐 Initial Structure",
         "🏗️ Current Structure",
         "📏 Deformation",
         "🌡️ Strain Energy",
+        "⚡ Internal Forces",
         "⬛ B/W Density",
     ]
 )
@@ -633,6 +634,35 @@ with tab_heatmap:
         except Exception:
             logger.exception("Failed to render energy heatmap")
             st.error("Could not render the strain energy heatmap.")
+    else:
+        st.info("Run an optimization or a single step first.")
+
+with tab_loadpath:
+    u_lp = st.session_state.displacement
+    if u_lp is not None:
+        try:
+            struct.renumber_dofs()
+            spring_forces = FEMSolver.compute_internal_forces(struct, u_lp)
+            fig_lp = Visualizer.plot_internal_forces(
+                struct,
+                spring_forces,
+                title="Tension & Compression",
+            )
+            st.pyplot(fig_lp)
+
+            st.write("")
+            png_lp = Visualizer.fig_to_png_bytes(fig_lp)
+            st.download_button(
+                "⬇️ Download Image (PNG)",
+                data=png_lp,
+                file_name="load_path.png",
+                mime="image/png",
+                key="dl_lp",
+            )
+            plt.close(fig_lp)
+        except Exception:
+            logger.exception("Failed to render load path plot")
+            st.error("Could not render the load path plot.")
     else:
         st.info("Run an optimization or a single step first.")
 

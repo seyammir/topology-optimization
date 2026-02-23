@@ -68,6 +68,54 @@ class FEMSolver:
         u = np.nan_to_num(u, nan=0.0, posinf=0.0, neginf=0.0)
         return u
 
+    # Load-path analysis
+    @staticmethod
+    def compute_internal_forces(
+        structure: Structure, u: np.ndarray,
+    ) -> dict[tuple[int, int], dict]:
+        """Compute the internal (axial) force in every spring.
+
+        Parameters
+        ----------
+        structure : Structure
+            The solved structure (DOFs must be numbered).
+        u : ndarray, shape (num_dofs,)
+            Global displacement vector from :meth:`solve`.
+
+        Returns
+        -------
+        dict[(node_i_id, node_j_id), info]
+            For each spring a dict with keys:
+
+            * ``"axial_force"`` - signed scalar (positive = tension,
+              negative = compression).
+            * ``"abs_force"`` - absolute value.
+            * ``"force_vec"`` - (fx, fz) global force vector acting on
+              node_j (reaction to the spring elongation).
+            * ``"node_i"`` / ``"node_j"`` - endpoint coordinates.
+            * ``"angle"`` - spring angle [rad].
+        """
+        import math
+        results: dict[tuple[int, int], dict] = {}
+        for spring in structure.get_springs():
+            dofs = spring.dof_indices  # [ix, iz, jx, jz]
+            u_e = u[dofs]
+            c = math.cos(spring.angle)
+            s = math.sin(spring.angle)
+            # Axial elongation: δ = c*(ux_j-ux_i) + s*(uz_j-uz_i)
+            delta = c * (u_e[2] - u_e[0]) + s * (u_e[3] - u_e[1])
+            axial = spring.k * delta  # positive = tension
+            ni, nj = spring.node_ids
+            results[(ni, nj)] = {
+                "axial_force": axial,
+                "abs_force": abs(axial),
+                "force_vec": (axial * c, axial * s),
+                "node_i": (spring.node_i.x, spring.node_i.z),
+                "node_j": (spring.node_j.x, spring.node_j.z),
+                "angle": spring.angle,
+            }
+        return results
+
     # Assembly
     @staticmethod
     def _assemble_global_stiffness(structure: Structure) -> sparse.lil_matrix:
