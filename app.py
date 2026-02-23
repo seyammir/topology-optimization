@@ -67,7 +67,7 @@ st.markdown(
     /* Tighten metrics row spacing (theme-aware) */
     div[data-testid="stMetric"] {
         background: color-mix(in srgb, var(--default-textColor) 6%, transparent);
-        border: 1px solid color-mix(in srgb, var(--default-textColor) 12%, transparent);
+        border: 1px solid rgba(128, 128, 128, 0.45);
         border-radius: 8px;
         padding: 10px 14px;
     }
@@ -280,6 +280,7 @@ with st.expander("🔧 Edit Boundary Conditions & Forces", expanded=False):
         st.warning("No node found at this position.")
 
 # Summary metrics
+st.divider()
 col_m1, col_m2, col_m3, col_m4 = st.columns(4)
 col_m1.metric("Nodes", struct.num_nodes)
 col_m2.metric("Springs", struct.graph.number_of_edges())
