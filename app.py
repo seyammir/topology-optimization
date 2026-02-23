@@ -27,6 +27,7 @@ from src.utils.io_handler import state_to_json_string, structure_from_json_strin
 from src.utils.image_import import structure_from_image
 from src.utils.visualization import Visualizer
 from src.presets.mbb_beam import create_mbb_beam
+from streamlit_drawable_canvas import st_canvas
 
 
 # Logging configuration
@@ -99,6 +100,10 @@ if "img_upload_key" not in st.session_state:
     st.session_state.img_upload_key = 0
 if "show_img_upload_success" not in st.session_state:
     st.session_state.show_img_upload_success = False
+if "canvas_key" not in st.session_state:
+    st.session_state.canvas_key = 0
+if "show_canvas_success" not in st.session_state:
+    st.session_state.show_canvas_success = False
 
 
 def _reset_state() -> None:
@@ -254,6 +259,73 @@ with st.sidebar:
         except Exception as exc:
             logger.exception("Failed to import structure from image")
             st.error(f"Could not import image: {exc}")
+
+    # Draw structure
+    st.divider()
+    st.subheader("✏️ Draw Structure")
+    st.caption(
+        "Draw your shape below (black = material).  "
+        "Click **Apply Drawing** when done."
+    )
+    if st.session_state.show_canvas_success:
+        st.toast("Structure created from drawing!", icon="✅")
+        st.session_state.show_canvas_success = False
+
+    drawing_mode = st.selectbox(
+        "Drawing Tool",
+        ["freedraw", "rect", "circle", "line", "transform"],
+        format_func=lambda m: {
+            "freedraw": "✏️ Freehand",
+            "rect": "⬜ Rectangle",
+            "circle": "⭕ Circle",
+            "line": "📏 Line",
+            "transform": "🔄 Move / Resize",
+        }[m],
+    )
+
+    canvas_result = st_canvas(
+        fill_color="#000000",
+        stroke_width=st.slider("Brush Size", 1, 30, 10, key="brush_size"),
+        stroke_color="#000000",
+        background_color="#FFFFFF",
+        width=300,
+        height=200,
+        drawing_mode=drawing_mode,
+        key=f"canvas_{st.session_state.canvas_key}",
+    )
+
+    if st.button("🎨 Apply Drawing", use_container_width=True):
+        if canvas_result.image_data is not None:
+            try:
+                from PIL import Image as PILImage
+                import io
+                # canvas returns RGBA numpy array; convert to greyscale PNG
+                rgba = canvas_result.image_data.astype(np.uint8)
+                img = PILImage.fromarray(rgba, "RGBA").convert("L")
+                buf = io.BytesIO()
+                img.save(buf, format="PNG")
+                buf.seek(0)
+                struct_drawn = structure_from_image(
+                    buf, width=width, height=height, threshold=img_threshold,
+                )
+                st.session_state.structure = struct_drawn
+                st.session_state.initial_structure = struct_drawn.snapshot()
+                _reset_state()
+                st.session_state.editor_gen += 1
+                st.session_state.canvas_key += 1
+                logger.info(
+                    "Structure created from canvas drawing: %dx%d, %d nodes",
+                    width, height, struct_drawn.num_nodes,
+                )
+                st.session_state.show_canvas_success = True
+                st.rerun()
+            except ValueError as exc:
+                st.error(str(exc))
+            except Exception as exc:
+                logger.exception("Failed to create structure from drawing")
+                st.error(f"Could not create structure from drawing: {exc}")
+        else:
+            st.warning("Please draw something on the canvas first.")
 
     # About
     st.divider()
