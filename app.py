@@ -67,7 +67,7 @@ st.markdown(
     /* Tighten metrics row spacing (theme-aware) */
     div[data-testid="stMetric"] {
         background: color-mix(in srgb, var(--default-textColor) 6%, transparent);
-        border: 1px solid color-mix(in srgb, var(--default-textColor) 12%, transparent);
+        border: 1px solid rgba(128, 128, 128, 0.45);
         border-radius: 8px;
         padding: 10px 14px;
     }
@@ -280,6 +280,7 @@ with st.expander("🔧 Edit Boundary Conditions & Forces", expanded=False):
         st.warning("No node found at this position.")
 
 # Summary metrics
+st.divider()
 col_m1, col_m2, col_m3, col_m4 = st.columns(4)
 col_m1.metric("Nodes", struct.num_nodes)
 col_m2.metric("Springs", struct.graph.number_of_edges())
@@ -541,8 +542,53 @@ with tab_bw:
         logger.exception("Failed to render B/W density plot")
         st.error("Could not render the density plot.")
 
-# Compliance history chart (if full optimisation was run)
+# Animation export (if full optimisation was run)
 result: OptimizationResult | None = st.session_state.result
+if result is not None and len(result.history) > 1:
+    st.divider()
+    st.subheader("🎬 Optimization Animation")
+
+    anim_cols = st.columns([1, 1, 2])
+    with anim_cols[0]:
+        anim_mode = st.selectbox(
+            "Style",
+            ["B/W Density", "Structure"],
+            key="anim_mode",
+        )
+    with anim_cols[1]:
+        anim_speed = st.slider(
+            "Frame Duration (ms)", 100, 1000, 300, 50,
+            key="anim_speed",
+        )
+
+    mode_key = "bw" if anim_mode == "B/W Density" else "structure"
+
+    if st.button("🎞️ Generate Animation (GIF)", use_container_width=False, key="gen_anim"):
+        try:
+            with st.spinner("Rendering animation frames…"):
+                gif_bytes = Visualizer.create_animation_gif(
+                    result.history,
+                    initial_structure=st.session_state.initial_structure,
+                    mode=mode_key,
+                    duration_ms=anim_speed,
+                )
+            st.session_state["animation_gif"] = gif_bytes
+            st.session_state["animation_mode"] = mode_key
+        except Exception:
+            logger.exception("Failed to create animation GIF")
+            st.error("Could not create the animation. Check logs for details.")
+
+    if "animation_gif" in st.session_state and st.session_state["animation_gif"] is not None:
+        st.image(st.session_state["animation_gif"], caption="Optimization Animation", use_container_width=True)
+        st.download_button(
+            "⬇️ Download Animation (GIF)",
+            data=st.session_state["animation_gif"],
+            file_name="optimization_animation.gif",
+            mime="image/gif",
+            key="dl_anim",
+        )
+
+# Compliance history chart (if full optimisation was run)
 if result is not None and result.compliance_history:
     st.divider()
     st.subheader("📈 Compliance History")
