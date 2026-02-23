@@ -111,3 +111,34 @@ class TestExportHelpers:
         assert os.path.exists(path)
         assert os.path.getsize(path) > 0
         plt.close(fig)
+
+
+class TestAnimationGif:
+    """Test animated GIF creation."""
+
+    def test_create_animation_gif_bw(self, small_struct):
+        """GIF bytes are produced in B/W mode."""
+        history = [small_struct.snapshot(), small_struct.snapshot()]
+        gif = Visualizer.create_animation_gif(
+            history,
+            initial_structure=small_struct,
+            mode="bw",
+            duration_ms=100,
+        )
+        assert isinstance(gif, bytes)
+        assert len(gif) > 0
+        # GIF magic bytes
+        assert gif[:4] == b"GIF8"
+
+    def test_create_animation_gif_structure(self, small_struct):
+        """GIF bytes are produced in structure mode."""
+        history = [small_struct.snapshot()]
+        gif = Visualizer.create_animation_gif(
+            history, mode="structure", duration_ms=100,
+        )
+        assert isinstance(gif, bytes)
+        assert gif[:4] == b"GIF8"
+
+    def test_empty_history_raises(self):
+        with pytest.raises(ValueError, match="at least one"):
+            Visualizer.create_animation_gif([])
