@@ -24,12 +24,12 @@ from src.models.structure import Structure
 from src.solver.fem_solver import FEMSolver
 from src.solver.optimizer import OptimizationResult, TopologyOptimizer
 from src.utils.io_handler import state_to_json_string, structure_from_json_string
+from src.utils.image_import import structure_from_image
 from src.utils.visualization import Visualizer
 from src.presets.mbb_beam import create_mbb_beam
 
-# ---------------------------------------------------------------------------
+
 # Logging configuration
-# ---------------------------------------------------------------------------
 _LOG_DIR = Path("logs")
 _LOG_DIR.mkdir(exist_ok=True)
 _LOG_FMT = "%(asctime)s  %(levelname)-8s  %(name)s — %(message)s"
@@ -58,9 +58,7 @@ st.set_page_config(
     layout="wide",
 )
 
-# ---------------------------------------------------------------------------
 # Custom CSS for a cleaner look
-# ---------------------------------------------------------------------------
 st.markdown(
     """
     <style>
@@ -97,6 +95,10 @@ if "upload_key" not in st.session_state:
     st.session_state.upload_key = 0
 if "show_upload_success" not in st.session_state:
     st.session_state.show_upload_success = False
+if "img_upload_key" not in st.session_state:
+    st.session_state.img_upload_key = 0
+if "show_img_upload_success" not in st.session_state:
+    st.session_state.show_img_upload_success = False
 
 
 def _reset_state() -> None:
@@ -209,6 +211,49 @@ with st.sidebar:
         except Exception as exc:
             logger.exception("Unexpected error loading uploaded state")
             st.error(f"Could not load state: {exc}")
+
+    # Image import
+    st.divider()
+    st.subheader("🖼️ Import from Image")
+    st.caption(
+        "Upload a **black & white** image.  "
+        "Black pixels -> material, white pixels -> void.  "
+        "The image is resized to the grid dimensions above."
+    )
+    if st.session_state.show_img_upload_success:
+        st.toast("Structure imported from image!", icon="✅")
+        st.session_state.show_img_upload_success = False
+
+    img_threshold = st.slider(
+        "BW Threshold", 0, 255, 128,
+        help="Grey-value cut-off (0-255). Pixels darker than this are material.",
+    )
+    img_file = st.file_uploader(
+        "Upload Image",
+        type=["png", "jpg", "jpeg", "bmp", "gif", "tiff"],
+        key=f"img_uploader_{st.session_state.img_upload_key}",
+    )
+    if img_file is not None:
+        try:
+            struct_img = structure_from_image(
+                img_file, width=width, height=height, threshold=img_threshold,
+            )
+            st.session_state.structure = struct_img
+            st.session_state.initial_structure = struct_img.snapshot()
+            _reset_state()
+            st.session_state.editor_gen += 1
+            logger.info(
+                "Structure imported from image: %dx%d, %d nodes",
+                width, height, struct_img.num_nodes,
+            )
+            st.session_state.show_img_upload_success = True
+            st.session_state.img_upload_key += 1
+            st.rerun()
+        except ValueError as exc:
+            st.error(str(exc))
+        except Exception as exc:
+            logger.exception("Failed to import structure from image")
+            st.error(f"Could not import image: {exc}")
 
     # About
     st.divider()
