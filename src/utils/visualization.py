@@ -11,6 +11,7 @@ import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
 import numpy as np
 from matplotlib.figure import Figure
+from PIL import Image
 
 from ..models.structure import Structure
 
@@ -385,6 +386,97 @@ class Visualizer:
         except Exception:
             logger.exception("Failed to render figure to PNG")
             raise RuntimeError("Could not render the figure to PNG") from None
+
+    @classmethod
+    def create_animation_gif(
+        cls,
+        history: list[Structure],
+        initial_structure: Structure | None = None,
+        mode: str = "bw",
+        duration_ms: int = 300,
+        loop: int = 0,
+    ) -> bytes:
+        """Create an animated GIF from a list of structure snapshots.
+
+        Parameters
+        ----------
+        history : list[Structure]
+            Ordered list of structure snapshots (e.g. from
+            ``OptimizationResult.history``).
+        initial_structure : Structure, optional
+            The original grid structure, used as reference for the B/W
+            density plot.
+        mode : str
+            ``"bw"`` for black-and-white density frames,
+            ``"structure"`` for wireframe structure frames.
+        duration_ms : int
+            Duration of each frame in milliseconds.
+        loop : int
+            Number of times to loop (0 = infinite).
+
+        Returns
+        -------
+        bytes
+            The GIF file content.
+
+        Raises
+        ------
+        ValueError
+            If *history* is empty.
+        RuntimeError
+            If the GIF cannot be rendered.
+        """
+        if not history:
+            raise ValueError("history must contain at least one snapshot")
+
+        ref = initial_structure if initial_structure is not None else history[0]
+        frames: list[Image.Image] = []
+
+        try:
+            for idx, snap in enumerate(history):
+                if mode == "bw":
+                    fig = cls.plot_bw_density(
+                        snap,
+                        initial_structure=ref,
+                        title=f"Iteration {idx}",
+                    )
+                else:
+                    fig = cls.plot_structure(
+                        snap,
+                        title=f"Iteration {idx}",
+                    )
+
+                # Render figure to PIL Image
+                buf = io.BytesIO()
+                fig.savefig(buf, format="png", dpi=100, bbox_inches="tight")
+                plt.close(fig)
+                buf.seek(0)
+                img = Image.open(buf).convert("RGBA")
+                # Composite onto white background for GIF compatibility
+                background = Image.new("RGBA", img.size, (255, 255, 255, 255))
+                background.paste(img, mask=img)
+                frames.append(background.convert("RGB"))
+
+            # Hold the last frame longer
+            durations = [duration_ms] * len(frames)
+            if len(durations) > 1:
+                durations[-1] = duration_ms * 4
+
+            out = io.BytesIO()
+            frames[0].save(
+                out,
+                format="GIF",
+                save_all=True,
+                append_images=frames[1:],
+                duration=durations,
+                loop=loop,
+            )
+            out.seek(0)
+            logger.info("Created animation GIF with %d frames", len(frames))
+            return out.read()
+        except Exception:
+            logger.exception("Failed to create animation GIF")
+            raise RuntimeError("Could not create the animation GIF") from None
 
     @staticmethod
     def export_image(fig: Figure, path: str) -> None:
