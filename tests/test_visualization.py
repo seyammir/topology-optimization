@@ -142,3 +142,33 @@ class TestAnimationGif:
     def test_empty_history_raises(self):
         with pytest.raises(ValueError, match="at least one"):
             Visualizer.create_animation_gif([])
+
+
+class TestPlotLoadPaths:
+    """Visualizer.plot_internal_forces"""
+
+    @pytest.fixture
+    def solved(self, small_struct):
+        small_struct.renumber_dofs()
+        u = FEMSolver().solve(small_struct)
+        forces = FEMSolver.compute_internal_forces(small_struct, u)
+        return small_struct, forces
+
+    def test_returns_figure(self, solved):
+        struct, forces = solved
+        fig = Visualizer.plot_internal_forces(struct, forces)
+        assert isinstance(fig, Figure)
+        plt.close(fig)
+
+    def test_custom_title(self, solved):
+        struct, forces = solved
+        fig = Visualizer.plot_internal_forces(struct, forces, title="Custom")
+        assert isinstance(fig, Figure)
+        plt.close(fig)
+
+    def test_exportable_to_png(self, solved):
+        struct, forces = solved
+        fig = Visualizer.plot_internal_forces(struct, forces)
+        png = Visualizer.fig_to_png_bytes(fig)
+        assert len(png) > 100
+        plt.close(fig)

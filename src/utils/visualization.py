@@ -11,6 +11,7 @@ import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
 import numpy as np
 from matplotlib.figure import Figure
+from matplotlib.collections import LineCollection
 from PIL import Image
 
 from ..models.structure import Structure
@@ -365,6 +366,151 @@ class Visualizer:
         )
         ax.set_title(title, fontsize=13, fontweight="bold")
         ax.axis("off")
+        fig.tight_layout()
+        return fig
+
+    # Internal forces
+    @classmethod
+    def plot_internal_forces(
+        cls,
+        structure: Structure,
+        spring_forces: dict[tuple[int, int], dict],
+        title: str = "Internal Forces",
+        ax: plt.Axes | None = None,
+    ) -> Figure:
+        """Visualise internal axial forces in the structure.
+
+        Springs are coloured and sized by their internal axial force:
+        **red** = tension, **blue** = compression.
+
+        Parameters
+        ----------
+        structure : Structure
+        spring_forces : dict
+            Per-spring internal forces (from
+            :meth:`FEMSolver.compute_internal_forces`).
+        title : str
+        ax : Axes, optional
+
+        Returns
+        -------
+        Figure
+        """
+        if ax is None:
+            fig, ax = plt.subplots(figsize=(12, 7))
+        else:
+            fig = ax.figure
+
+        nodes = structure.get_nodes()
+        springs = structure.get_springs()
+
+        # springs coloured & sized by internal force
+        f_max = 1.0
+        if spring_forces:
+            abs_forces = [info["abs_force"] for info in spring_forces.values()]
+            f_max = max(abs_forces) if abs_forces else 1.0
+            if f_max < cls.FORCE_EPSILON:
+                f_max = 1.0
+
+            # build segments + colours for LineCollection
+            segments = []
+            colours = []
+            widths = []
+            for (ni, nj), info in spring_forces.items():
+                xi, zi = info["node_i"]
+                xj, zj = info["node_j"]
+                segments.append([(xi, zi), (xj, zj)])
+
+                axial = info["axial_force"]
+                # map: -1 (compression/blue) -> 0, 0 (neutral) -> 0.5, +1 (tension/red) -> 1
+                norm_val = 0.5 + 0.5 * np.clip(axial / f_max, -1, 1)
+                colours.append(norm_val)
+
+                # Width proportional to |force|, min 0.3, max 4.5
+                w = 0.3 + 4.2 * (info["abs_force"] / f_max)
+                widths.append(w)
+
+            cmap = plt.cm.coolwarm  # blue (compression) ↔ red (tension)
+            lc = LineCollection(
+                segments,
+                array=np.array(colours),
+                cmap=cmap,
+                linewidths=widths,
+                clim=(0, 1),
+                zorder=1,
+            )
+            ax.add_collection(lc)
+
+            # colourbar
+            sm = plt.cm.ScalarMappable(
+                cmap=cmap,
+                norm=mcolors.Normalize(vmin=-f_max, vmax=f_max),
+            )
+            sm.set_array([])
+            cbar = fig.colorbar(sm, ax=ax, label="Axial Force  (- compress. / + tension)")
+            cbar.ax.tick_params(labelsize=8)
+
+        # supports & loads markers
+        support_plotted = False
+        for n in nodes:
+            if n.is_fixed:
+                marker = "^" if n.is_pinned else (">" if n.fixed_z else "v")
+                label = "Support" if not support_plotted else None
+                ax.plot(
+                    n.x, n.z, marker=marker, color=cls.COLOR_SUPPORT,
+                    markersize=11, zorder=6, linestyle="None", label=label,
+                )
+                support_plotted = True
+
+        force_plotted = False
+        for n in nodes:
+            if n.has_load:
+                mag = max(abs(n.fx), abs(n.fz), cls.FORCE_EPSILON)
+                dx = n.fx / mag * 0.7
+                dz = n.fz / mag * 0.7
+                ax.annotate(
+                    "",
+                    xy=(n.x + dx, n.z + dz),
+                    xytext=(n.x, n.z),
+                    arrowprops=dict(arrowstyle="->,head_width=0.35", color=cls.COLOR_LOAD, lw=2.5),
+                    zorder=7,
+                )
+                if not force_plotted:
+                    ax.plot(
+                        [], [], color=cls.COLOR_LOAD, marker=r"$\rightarrow$",
+                        markersize=12, linestyle="None", label="Applied Force",
+                    )
+                    force_plotted = True
+
+        # legend
+        from matplotlib.lines import Line2D
+        legend_elements = []
+        legend_elements.append(Line2D([0], [0], color="#b91c1c", lw=2, label="Tension"))
+        legend_elements.append(Line2D([0], [0], color="#1d4ed8", lw=2, label="Compression"))
+        if support_plotted:
+            legend_elements.append(Line2D(
+                [0], [0], marker="^", color=cls.COLOR_SUPPORT,
+                linestyle="None", markersize=9, label="Support",
+            ))
+        if force_plotted:
+            legend_elements.append(Line2D(
+                [0], [0], marker=r"$\rightarrow$", color=cls.COLOR_LOAD,
+                linestyle="None", markersize=10, label="Applied Force",
+            ))
+
+        # axes configuration
+        ax.set_aspect("equal")
+        ax.autoscale_view()
+        ax.invert_yaxis()
+        ax.set_title(title, fontsize=13, fontweight="bold")
+        ax.set_xlabel("x")
+        ax.set_ylabel("z")
+
+        ax.legend(
+            handles=legend_elements, loc="upper right", fontsize=7,
+            framealpha=0.85, edgecolor="#cccccc", fancybox=True,
+        )
+
         fig.tight_layout()
         return fig
 
