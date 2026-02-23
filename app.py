@@ -93,6 +93,10 @@ if "iteration" not in st.session_state:
     st.session_state.iteration = 0
 if "editor_gen" not in st.session_state:
     st.session_state.editor_gen = 0
+if "upload_key" not in st.session_state:
+    st.session_state.upload_key = 0
+if "show_upload_success" not in st.session_state:
+    st.session_state.show_upload_success = False
 
 
 def _reset_state() -> None:
@@ -172,8 +176,17 @@ with st.sidebar:
             logger.exception("Failed to serialise structure for download")
             st.error("Could not prepare the download. See logs for details.")
 
+    # Show success toast from previous upload
+    if st.session_state.show_upload_success:
+        st.toast("State loaded successfully!", icon="✅")
+        st.session_state.show_upload_success = False
+
     # Upload
-    uploaded = st.file_uploader("Load State (JSON)", type=["json"])
+    uploaded = st.file_uploader(
+        "Load State (JSON)",
+        type=["json"],
+        key=f"uploader_{st.session_state.upload_key}",
+    )
     if uploaded is not None:
         try:
             content = uploaded.read().decode("utf-8")
@@ -181,7 +194,12 @@ with st.sidebar:
             st.session_state.initial_structure = st.session_state.structure.snapshot()
             _reset_state()
             logger.info("State loaded from uploaded file")
-            st.success("State loaded successfully!")
+            # Set flag to show success message after rerun
+            st.session_state.show_upload_success = True
+            # Clear the uploader so the old file does not get
+            # re-applied on every subsequent rerun.
+            st.session_state.upload_key += 1
+            st.rerun()
         except json.JSONDecodeError:
             logger.exception("Uploaded file is not valid JSON")
             st.error("The uploaded file is not valid JSON. Please check the file format.")
