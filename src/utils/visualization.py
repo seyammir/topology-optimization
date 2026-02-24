@@ -15,6 +15,7 @@ from matplotlib.collections import LineCollection
 from PIL import Image
 
 from ..models.structure import Structure
+from ..solver.optimizer_base import OptimizationResult
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +49,7 @@ class Visualizer:
         title: str = "Structure",
         show_node_ids: bool = False,
         ax: plt.Axes | None = None,
+        densities: dict[tuple[int, int], float] | None = None,
     ) -> Figure:
         """Draw the structure (optionally deformed).
 
@@ -63,6 +65,10 @@ class Visualizer:
         show_node_ids : bool
         ax : Axes, optional
             If *None* a new figure is created.
+        densities : dict, optional
+            Per-spring SIMP density values.  When provided, springs
+            with density below a threshold are hidden and remaining
+            springs are drawn with thickness proportional to density.
 
         Returns
         -------
@@ -91,31 +97,63 @@ class Visualizer:
                 else 1.0
             )
 
+        # Helper: look up density for a spring
+        _DENS_THRESHOLD = 0.01  # springs below this are invisible
+        def _get_density(sp):
+            if densities is None:
+                return 1.0
+            key = sp.node_ids
+            rkey = (key[1], key[0])
+            return densities.get(key, densities.get(rkey, 1.0))
+
         # undeformed springs (light grey, thin)
         for sp in springs:
+            xe = _get_density(sp)
+            if xe < _DENS_THRESHOLD:
+                continue
             xi, zi = sp.node_i.x, sp.node_i.z
             xj, zj = sp.node_j.x, sp.node_j.z
-            ax.plot([xi, xj], [zi, zj], color=cls.COLOR_SPRING, lw=0.5, zorder=1)
+            lw = 0.5 if densities is None else 0.3 + 2.0 * xe
+            alpha = 1.0 if densities is None else max(0.15, xe)
+            ax.plot([xi, xj], [zi, zj], color=cls.COLOR_SPRING, lw=lw,
+                    alpha=alpha, zorder=1)
 
         # deformed springs (orange, solid, prominent)
         if u is not None:
             structure.renumber_dofs()
             for sp in springs:
+                xe = _get_density(sp)
+                if xe < _DENS_THRESHOLD:
+                    continue
                 dofs = sp.dof_indices
                 xi = sp.node_i.x + scale * u[dofs[0]]
                 zi = sp.node_i.z + scale * u[dofs[1]]
                 xj = sp.node_j.x + scale * u[dofs[2]]
                 zj = sp.node_j.z + scale * u[dofs[3]]
+                lw = 1.2 if densities is None else 0.3 + 2.5 * xe
+                alpha = 1.0 if densities is None else max(0.15, xe)
                 ax.plot(
                     [xi, xj], [zi, zj],
-                    color=cls.COLOR_DEFORMED, lw=1.2, zorder=2,
+                    color=cls.COLOR_DEFORMED, lw=lw, alpha=alpha, zorder=2,
                 )
+
+        # Determine which nodes belong to active springs
+        if densities is not None:
+            _active_node_ids = set()
+            for sp in springs:
+                if _get_density(sp) >= _DENS_THRESHOLD:
+                    ni, nj = sp.node_ids
+                    _active_node_ids.add(ni)
+                    _active_node_ids.add(nj)
+            active_nodes = [n for n in nodes if n.id in _active_node_ids]
+        else:
+            active_nodes = nodes
 
         # deformed nodes
         if u is not None:
             structure.renumber_dofs()
-            def_xs = [n.x + scale * u[n.dof_indices[0]] for n in nodes]
-            def_zs = [n.z + scale * u[n.dof_indices[1]] for n in nodes]
+            def_xs = [n.x + scale * u[n.dof_indices[0]] for n in active_nodes]
+            def_zs = [n.z + scale * u[n.dof_indices[1]] for n in active_nodes]
             ax.scatter(
                 def_xs, def_zs, s=14,
                 c=cls.COLOR_DEFORMED, edgecolors="none",
@@ -123,8 +161,8 @@ class Visualizer:
             )
 
         # nodes (undeformed)
-        xs = [n.x for n in nodes]
-        zs = [n.z for n in nodes]
+        xs = [n.x for n in active_nodes]
+        zs = [n.z for n in active_nodes]
         ax.scatter(xs, zs, s=12, c=cls.COLOR_NODE, zorder=3, label="Original")
 
         # supports (triangles)
@@ -172,11 +210,13 @@ class Visualizer:
         ax.set_ylabel("z")
 
         # Info text
-        info = f"Nodes: {len(nodes)}  |  Springs: {len(springs)}"
+        active_spring_count = sum(1 for sp in springs if _get_density(sp) >= _DENS_THRESHOLD)
+        info = f"Nodes: {len(active_nodes)}  |  Springs: {active_spring_count}"
         ax.text(
             0.01, 0.01, info,
             transform=ax.transAxes, fontsize=8,
             verticalalignment="bottom", color="#555555",
+            zorder=10,
             bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.7, edgecolor="#cccccc"),
         )
 
@@ -199,6 +239,7 @@ class Visualizer:
         node_energies: dict[int, float],
         title: str = "Strain Energy Heatmap",
         ax: plt.Axes | None = None,
+        densities: dict[tuple[int, int], float] | None = None,
     ) -> Figure:
         """Colour springs / nodes by strain energy.
 
@@ -209,6 +250,9 @@ class Visualizer:
             Per-node energy values.
         title : str
         ax : Axes, optional
+        densities : dict, optional
+            Per-spring SIMP densities.  When given, springs below
+            threshold are hidden.
 
         Returns
         -------
@@ -222,12 +266,40 @@ class Visualizer:
         springs = structure.get_springs()
         nodes = structure.get_nodes()
 
+        # Density helper
+        _DENS_THRESHOLD = 0.01
+        def _spring_density(sp):
+            if densities is None:
+                return 1.0
+            key = sp.node_ids
+            rkey = (key[1], key[0])
+            return densities.get(key, densities.get(rkey, 1.0))
+
+        # Filter springs by density
+        active_springs = [sp for sp in springs if _spring_density(sp) >= _DENS_THRESHOLD]
+
+        # Active nodes
+        if densities is not None:
+            active_ids = set()
+            for sp in active_springs:
+                ni, nj = sp.node_ids
+                active_ids.add(ni)
+                active_ids.add(nj)
+            active_nodes = [n for n in nodes if n.id in active_ids]
+        else:
+            active_nodes = nodes
+
         # Spring energy = average of the two end-node energies.
         if not node_energies:
             return fig
 
-        e_min = min(node_energies.values())
-        e_max = max(node_energies.values())
+        # Compute min/max only over active nodes
+        active_energies = {n.id: node_energies.get(n.id, 0.0) for n in active_nodes}
+        if active_energies:
+            e_min = min(active_energies.values())
+            e_max = max(active_energies.values())
+        else:
+            e_min, e_max = 0.0, 1.0
         if e_max == e_min:
             e_max = e_min + 1.0
 
@@ -236,22 +308,23 @@ class Visualizer:
         def _normed(val: float) -> float:
             return (val - e_min) / (e_max - e_min)
 
-        for sp in springs:
+        for sp in active_springs:
             ni, nj = sp.node_ids
             ei = node_energies.get(ni, 0.0)
             ej = node_energies.get(nj, 0.0)
             avg = (ei + ej) / 2.0
             colour = cmap(_normed(avg))
+            lw = 1.5 if densities is None else 0.5 + 2.5 * _spring_density(sp)
             ax.plot(
                 [sp.node_i.x, sp.node_j.x],
                 [sp.node_i.z, sp.node_j.z],
-                color=colour, lw=1.5, zorder=1,
+                color=colour, lw=lw, zorder=1,
             )
 
         # Nodes
-        xs = [n.x for n in nodes]
-        zs = [n.z for n in nodes]
-        cs = [_normed(node_energies.get(n.id, 0.0)) for n in nodes]
+        xs = [n.x for n in active_nodes]
+        zs = [n.z for n in active_nodes]
+        cs = [_normed(node_energies.get(n.id, 0.0)) for n in active_nodes]
         sc = ax.scatter(xs, zs, c=cs, cmap=cmap, s=18, zorder=3, edgecolors="k", linewidths=0.3)
         cbar = fig.colorbar(sc, ax=ax, label="Strain Energy")
         cbar.ax.tick_params(labelsize=8)
@@ -259,9 +332,10 @@ class Visualizer:
         # Min / max energy annotation
         ax.text(
             0.01, 0.01,
-            f"Min: {e_min:.2e}  |  Max: {e_max:.2e}  |  Nodes: {len(nodes)}",
+            f"Min: {e_min:.2e}  |  Max: {e_max:.2e}  |  Nodes: {len(active_nodes)}",
             transform=ax.transAxes, fontsize=8,
             verticalalignment="bottom", color="#555555",
+            zorder=10,
             bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.7, edgecolor="#cccccc"),
         )
 
@@ -369,6 +443,119 @@ class Visualizer:
         fig.tight_layout()
         return fig
 
+    # B/W density from SIMP spring densities
+    @classmethod
+    def plot_bw_density_from_springs(
+        cls,
+        structure: Structure,
+        densities: dict[tuple[int, int], float],
+        initial_structure: Structure | None = None,
+        title: str = "Topology (B/W) - SIMP",
+        ax: plt.Axes | None = None,
+    ) -> Figure:
+        """Render a B/W density image derived from SIMP spring densities.
+
+        For each rectangular cell in the grid, the density is computed
+        as the average density of the springs that form its edges.
+        This gives a classic SIMP-style black/white density plot.
+
+        Parameters
+        ----------
+        structure : Structure
+        densities : dict[(ni, nj), float]
+            Per-spring density values in [0, 1].
+        initial_structure : Structure, optional
+        title : str
+        ax : Axes, optional
+
+        Returns
+        -------
+        Figure
+        """
+        nodes = structure.get_nodes()
+        ref = initial_structure if initial_structure is not None else structure
+
+        ref_nodes = ref.get_nodes()
+        xs_sorted = sorted({n.x for n in ref_nodes})
+        zs_sorted = sorted({n.z for n in ref_nodes})
+
+        if len(xs_sorted) < 2 or len(zs_sorted) < 2:
+            if ax is None:
+                fig, ax = plt.subplots()
+            else:
+                fig = ax.figure
+            ax.text(0.5, 0.5, "Grid too small", ha="center", va="center",
+                    transform=ax.transAxes)
+            return fig
+
+        # Build a lookup: node position -> node id
+        pos_to_id: dict[tuple[float, float], int] = {}
+        for n in nodes:
+            pos_to_id[(n.x, n.z)] = n.id
+
+        # Build a fast density lookup that handles both key orderings
+        dens_lookup: dict[tuple[int, int], float] = {}
+        for k, v in densities.items():
+            dens_lookup[k] = v
+            dens_lookup[(k[1], k[0])] = v
+
+        n_cells_x = len(xs_sorted) - 1
+        n_cells_z = len(zs_sorted) - 1
+        density_img = np.zeros((n_cells_z, n_cells_x))
+
+        for iz in range(n_cells_z):
+            for ix in range(n_cells_x):
+                # Four corner positions
+                corners = [
+                    (xs_sorted[ix],     zs_sorted[iz]),
+                    (xs_sorted[ix + 1], zs_sorted[iz]),
+                    (xs_sorted[ix],     zs_sorted[iz + 1]),
+                    (xs_sorted[ix + 1], zs_sorted[iz + 1]),
+                ]
+                corner_ids = [pos_to_id.get(c) for c in corners]
+
+                # Collect densities of edges forming this cell
+                edge_densities = []
+                # 4 edges: top, bottom, left, right
+                edges = [
+                    (corner_ids[0], corner_ids[1]),  # top
+                    (corner_ids[2], corner_ids[3]),  # bottom
+                    (corner_ids[0], corner_ids[2]),  # left
+                    (corner_ids[1], corner_ids[3]),  # right
+                ]
+                for e in edges:
+                    if e[0] is not None and e[1] is not None:
+                        d = dens_lookup.get(e, dens_lookup.get((e[1], e[0])))
+                        if d is not None:
+                            edge_densities.append(d)
+
+                if edge_densities:
+                    density_img[iz, ix] = sum(edge_densities) / len(edge_densities)
+                else:
+                    density_img[iz, ix] = 0.0
+
+        if ax is None:
+            aspect = n_cells_x / max(n_cells_z, 1)
+            fig_w = min(12, max(6, aspect * 4))
+            fig_h = fig_w / max(aspect, 0.3)
+            fig, ax = plt.subplots(figsize=(fig_w, min(fig_h, 8)))
+        else:
+            fig = ax.figure
+
+        ax.imshow(
+            density_img,
+            cmap="gray_r",
+            vmin=0,
+            vmax=1,
+            aspect="equal",
+            interpolation="none",
+            origin="upper",
+        )
+        ax.set_title(title, fontsize=13, fontweight="bold")
+        ax.axis("off")
+        fig.tight_layout()
+        return fig
+
     # Internal forces
     @classmethod
     def plot_internal_forces(
@@ -377,6 +564,7 @@ class Visualizer:
         spring_forces: dict[tuple[int, int], dict],
         title: str = "Internal Forces",
         ax: plt.Axes | None = None,
+        densities: dict[tuple[int, int], float] | None = None,
     ) -> Figure:
         """Visualise internal axial forces in the structure.
 
@@ -391,6 +579,9 @@ class Visualizer:
             :meth:`FEMSolver.compute_internal_forces`).
         title : str
         ax : Axes, optional
+        densities : dict, optional
+            Per-spring SIMP densities.  When given, springs below
+            threshold are hidden.
 
         Returns
         -------
@@ -403,6 +594,30 @@ class Visualizer:
 
         nodes = structure.get_nodes()
         springs = structure.get_springs()
+
+        # Density helper
+        _DENS_THRESHOLD = 0.01
+        def _key_density(ni, nj):
+            if densities is None:
+                return 1.0
+            return densities.get((ni, nj), densities.get((nj, ni), 1.0))
+
+        # Filter spring_forces by density
+        if densities is not None:
+            spring_forces = {
+                k: v for k, v in spring_forces.items()
+                if _key_density(k[0], k[1]) >= _DENS_THRESHOLD
+            }
+
+        # Active nodes (only those connected to visible springs)
+        if densities is not None:
+            active_ids = set()
+            for (ni, nj) in spring_forces:
+                active_ids.add(ni)
+                active_ids.add(nj)
+            active_nodes = [n for n in nodes if n.id in active_ids]
+        else:
+            active_nodes = nodes
 
         # springs coloured & sized by internal force
         f_max = 1.0
@@ -430,7 +645,7 @@ class Visualizer:
                 w = 0.3 + 4.2 * (info["abs_force"] / f_max)
                 widths.append(w)
 
-            cmap = plt.cm.coolwarm  # blue (compression) ↔ red (tension)
+            cmap = plt.cm.coolwarm  # blue (compression) <-> red (tension)
             lc = LineCollection(
                 segments,
                 array=np.array(colours),
@@ -452,7 +667,7 @@ class Visualizer:
 
         # supports & loads markers
         support_plotted = False
-        for n in nodes:
+        for n in active_nodes:
             if n.is_fixed:
                 marker = "^" if n.is_pinned else (">" if n.fixed_z else "v")
                 label = "Support" if not support_plotted else None
@@ -639,3 +854,320 @@ class Visualizer:
         except OSError:
             logger.exception("Failed to export image to %s", path)
             raise
+
+    # SIMP density-field visualisation
+
+    @classmethod
+    def plot_density_field(
+        cls,
+        structure: Structure,
+        densities: dict[tuple[int, int], float],
+        title: str = "Density Field (SIMP)",
+        ax: plt.Axes | None = None,
+    ) -> Figure:
+        """Render springs coloured/thickened by their SIMP density.
+
+        Parameters
+        ----------
+        structure : Structure
+        densities : dict[(ni, nj), float]
+            Per-spring density values in [0, 1].
+        title : str
+        ax : Axes, optional
+
+        Returns
+        -------
+        Figure
+        """
+        if ax is None:
+            fig, ax = plt.subplots(figsize=(10, 6))
+        else:
+            fig = ax.figure
+
+        springs = structure.get_springs()
+        nodes = structure.get_nodes()
+
+        if not springs:
+            ax.text(0.5, 0.5, "No springs", ha="center", va="center",
+                    transform=ax.transAxes)
+            return fig
+
+        segments = []
+        vals = []
+        for sp in springs:
+            key = sp.node_ids
+            rkey = (key[1], key[0])
+            xe = densities.get(key, densities.get(rkey, 1.0))
+            segments.append([(sp.node_i.x, sp.node_i.z),
+                             (sp.node_j.x, sp.node_j.z)])
+            vals.append(xe)
+
+        vals_arr = np.array(vals)
+        # Width proportional to density (thin = void, thick = solid)
+        widths = 0.3 + 3.0 * vals_arr
+        cmap = plt.cm.gray_r
+
+        lc = LineCollection(
+            segments,
+            array=vals_arr,
+            cmap=cmap,
+            linewidths=widths,
+            clim=(0, 1),
+            zorder=1,
+        )
+        ax.add_collection(lc)
+
+        # Colourbar
+        sm = plt.cm.ScalarMappable(
+            cmap=cmap,
+            norm=mcolors.Normalize(vmin=0, vmax=1),
+        )
+        sm.set_array([])
+        cbar = fig.colorbar(sm, ax=ax, label="Density x_e")
+        cbar.ax.tick_params(labelsize=8)
+
+        # Supports & forces (reuse same markers as plot_structure)
+        support_plotted = False
+        for n in nodes:
+            if n.is_fixed:
+                marker = "^" if n.is_pinned else (">" if n.fixed_z else "v")
+                label = "Support" if not support_plotted else None
+                ax.plot(n.x, n.z, marker=marker, color=cls.COLOR_SUPPORT,
+                        markersize=10, zorder=4, linestyle="None", label=label)
+                support_plotted = True
+
+        force_plotted = False
+        for n in nodes:
+            if n.has_load:
+                mag = max(abs(n.fx), abs(n.fz), cls.FORCE_EPSILON)
+                dx = n.fx / mag * 0.5
+                dz = n.fz / mag * 0.5
+                ax.annotate("", xy=(n.x + dx, n.z + dz), xytext=(n.x, n.z),
+                            arrowprops=dict(arrowstyle="->", color=cls.COLOR_LOAD, lw=2),
+                            zorder=5)
+                if not force_plotted:
+                    ax.plot([], [], color=cls.COLOR_LOAD, marker=r"$\rightarrow$",
+                            markersize=10, linestyle="None", label="Applied Force")
+                    force_plotted = True
+
+        ax.set_aspect("equal")
+        ax.autoscale_view()
+        ax.invert_yaxis()
+        ax.set_title(title, fontsize=13, fontweight="bold")
+        ax.set_xlabel("x")
+        ax.set_ylabel("z")
+
+        handles, labels = ax.get_legend_handles_labels()
+        if handles:
+            ax.legend(handles, labels, loc="upper right", fontsize=7,
+                      framealpha=0.85, edgecolor="#cccccc", fancybox=True)
+
+        info = f"Springs: {len(springs)}"
+        ax.text(0.01, 0.01, info, transform=ax.transAxes, fontsize=8,
+                verticalalignment="bottom", color="#555555",
+                zorder=10,
+                bbox=dict(boxstyle="round,pad=0.3", facecolor="white",
+                          alpha=0.7, edgecolor="#cccccc"))
+
+        fig.tight_layout()
+        return fig
+
+    # Comparison panel
+
+    @classmethod
+    def plot_comparison_structures(
+        cls,
+        results: dict[str, OptimizationResult],
+    ) -> Figure:
+        """Side-by-side final node-spring structure for each algorithm.
+
+        Parameters
+        ----------
+        results : dict[str, OptimizationResult]
+            Algorithm name -> result.
+
+        Returns
+        -------
+        Figure
+        """
+        n = len(results)
+        if n == 0:
+            fig, ax = plt.subplots()
+            ax.text(0.5, 0.5, "No results", ha="center", va="center",
+                    transform=ax.transAxes)
+            return fig
+
+        fig, axes = plt.subplots(
+            1, n, figsize=(7 * n, 5),
+            constrained_layout=True,
+        )
+        if n == 1:
+            axes = [axes]
+
+        # Collect axis limits across all results so both panels
+        # show the same coordinate range (avoids misleading whitespace).
+        all_x: list[float] = []
+        all_z: list[float] = []
+        for res in results.values():
+            struct = res.history[-1] if res.history else None
+            if struct is None:
+                continue
+            for nd in struct.get_nodes():
+                all_x.append(nd.x)
+                all_z.append(nd.z)
+
+        if all_x and all_z:
+            pad_x = max(1.0, (max(all_x) - min(all_x)) * 0.04)
+            pad_z = max(1.0, (max(all_z) - min(all_z)) * 0.04)
+            shared_xlim = (min(all_x) - pad_x, max(all_x) + pad_x)
+            shared_zlim = (min(all_z) - pad_z, max(all_z) + pad_z)
+        else:
+            shared_xlim = shared_zlim = None
+
+        for ax, (name, res) in zip(axes, results.items()):
+            struct = res.history[-1] if res.history else None
+            if struct is None:
+                ax.text(0.5, 0.5, "No data", ha="center", va="center",
+                        transform=ax.transAxes)
+                continue
+            cls.plot_structure(
+                struct, title=name, ax=ax,
+                densities=res.densities,
+            )
+            # Apply shared limits so both panels match.
+            # ylim is inverted (z positive downward) so pass (max, min).
+            if shared_xlim is not None:
+                ax.set_xlim(shared_xlim)
+                ax.set_ylim(shared_zlim[1], shared_zlim[0])
+
+        fig.suptitle("Algorithm Comparison",
+                     fontsize=15, fontweight="bold")
+        return fig
+
+    @classmethod
+    def plot_comparison(
+        cls,
+        results: dict[str, OptimizationResult],
+        initial_structure: Structure | None = None,
+    ) -> Figure:
+        """Side-by-side final topology for each algorithm.
+
+        Parameters
+        ----------
+        results : dict[str, OptimizationResult]
+            Algorithm name -> result.
+        initial_structure : Structure, optional
+            Used as reference for B/W density plots.
+
+        Returns
+        -------
+        Figure
+        """
+        n = len(results)
+        if n == 0:
+            fig, ax = plt.subplots()
+            ax.text(0.5, 0.5, "No results", ha="center", va="center",
+                    transform=ax.transAxes)
+            return fig
+
+        fig, axes = plt.subplots(1, n, figsize=(6 * n, 6))
+        if n == 1:
+            axes = [axes]
+
+        # Determine best compliance for highlighting
+        compliances = {}
+        for name, res in results.items():
+            c = res.compliance_history[-1] if res.compliance_history else float("inf")
+            compliances[name] = c
+        best_algo = min(compliances, key=compliances.get) if compliances else None
+
+        for ax, (name, res) in zip(axes, results.items()):
+            if res.densities is not None:
+                # SIMP - use density field on the last-history structure
+                struct = res.history[-1] if res.history else None
+                if struct is not None:
+                    cls.plot_density_field(struct, res.densities,
+                                          title=name, ax=ax)
+                else:
+                    ax.text(0.5, 0.5, "No data", ha="center", va="center",
+                            transform=ax.transAxes)
+            else:
+                # Discrete methods - use B/W density
+                struct = res.history[-1] if res.history else None
+                if struct is not None:
+                    cls.plot_bw_density(struct, initial_structure=initial_structure,
+                                       title=name, ax=ax)
+                else:
+                    ax.text(0.5, 0.5, "No data", ha="center", va="center",
+                            transform=ax.transAxes)
+
+            # Highlight the winner with a coloured border
+            is_best = (name == best_algo and n > 1)
+            border_color = "#16a34a" if is_best else "#cccccc"
+            border_width = 3 if is_best else 1
+            for spine in ax.spines.values():
+                spine.set_edgecolor(border_color)
+                spine.set_linewidth(border_width)
+
+            # Metrics annotation
+            c_final = compliances.get(name, 0.0)
+            winner_tag = "  ★ Best" if is_best else ""
+            ax.text(
+                0.5, -0.02,
+                f"Compliance: {c_final:.4g}  |  "
+                f"Iterations: {res.iterations}{winner_tag}",
+                transform=ax.transAxes, fontsize=9, ha="center",
+                va="top", color="#333",
+                bbox=dict(boxstyle="round,pad=0.3",
+                          facecolor="#d4edda" if is_best else "#f0f0f0",
+                          alpha=0.9, edgecolor="#aaa"),
+            )
+
+        fig.suptitle("Algorithm Comparison", fontsize=15, fontweight="bold", y=1.02)
+        fig.tight_layout()
+        return fig
+
+    @classmethod
+    def plot_compliance_comparison(
+        cls,
+        results: dict[str, OptimizationResult],
+    ) -> Figure:
+        """Overlay compliance-history curves for multiple algorithms.
+
+        Parameters
+        ----------
+        results : dict[str, OptimizationResult]
+
+        Returns
+        -------
+        Figure
+        """
+        fig, ax = plt.subplots(figsize=(10, 5))
+        colors = ["#2563eb", "#dc2626", "#16a34a", "#f59e0b", "#8b5cf6"]
+
+        for idx, (name, res) in enumerate(results.items()):
+            ch = res.compliance_history
+            if not ch:
+                continue
+            iters = list(range(1, len(ch) + 1))
+            color = colors[idx % len(colors)]
+            ax.plot(iters, ch, color=color, lw=2, marker="o", markersize=3,
+                    label=name)
+            ax.fill_between(iters, ch, alpha=0.06, color=color)
+
+            # Annotate final value
+            ax.annotate(
+                f"{ch[-1]:.4g}",
+                xy=(len(ch), ch[-1]),
+                xytext=(8, 0), textcoords="offset points",
+                fontsize=8, color=color, fontweight="bold", va="center",
+            )
+
+        ax.set_xlabel("Iteration", fontsize=10)
+        ax.set_ylabel("Compliance (total strain energy)", fontsize=10)
+        ax.set_title("Compliance Convergence — Algorithm Comparison",
+                     fontsize=13, fontweight="bold")
+        ax.grid(True, linestyle="--", alpha=0.4)
+        ax.legend(fontsize=10, framealpha=0.85, loc="best")
+        fig.tight_layout()
+        return fig

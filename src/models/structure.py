@@ -1,4 +1,4 @@
-"""Structure — the mass-spring graph that represents the 2-D domain.
+"""Structure - the mass-spring graph that represents the 2-D domain.
 
 Internally the structure is stored as a ``networkx.Graph``.  Each graph
 node holds a :class:`Node` object and each graph edge holds a :class:`Spring`
@@ -51,9 +51,9 @@ class Structure:
         Parameters
         ----------
         width : int
-            Number of cells in x-direction.  Must be ≥ 1.
+            Number of cells in x-direction.  Must be >= 1.
         height : int
-            Number of cells in z-direction.  Must be ≥ 1.
+            Number of cells in z-direction.  Must be >= 1.
 
         Returns
         -------
@@ -67,7 +67,7 @@ class Structure:
         """
         if width < 1 or height < 1:
             raise ValueError(
-                f"width and height must be ≥ 1, got width={width}, height={height}"
+                f"width and height must be >= 1, got width={width}, height={height}"
             )
         struct = cls()
         cols = width + 1
@@ -179,7 +179,7 @@ class Structure:
         return 2 * self.num_nodes
 
     def renumber_dofs(self) -> None:
-        """Assign consecutive DOF indices 0, 1, 2, … to all nodes.
+        """Assign consecutive DOF indices 0, 1, 2, ... to all nodes.
 
         Call this after any structural modification (node removal) before
         solving.
@@ -220,7 +220,7 @@ class Structure:
         former neighbours in a mechanism state?
 
         Only checks neighbours of the removed node (already removed from
-        graph) — O(degree) instead of O(N).
+        graph) - O(degree) instead of O(N).
         """
         for nid in self.graph.nodes:
             if self.node_is_mechanism(nid):
@@ -231,7 +231,7 @@ class Structure:
         """Return ``True`` if *nid* has a mechanism mode.
 
         A node is a mechanism when it can move in some direction without
-        any spring providing resistance — i.e. it has fewer than two
+        any spring providing resistance - i.e. it has fewer than two
         springs, or all its springs are collinear and the perpendicular
         direction is not constrained by a boundary condition.
         """
@@ -261,11 +261,11 @@ class Structure:
         return {n.id for n in self.get_nodes() if n.is_protected}
 
     def remove_dangling_nodes(self) -> int:
-        """Remove dangling branches — appendages attached to the main
+        """Remove dangling branches - appendages attached to the main
         structure through a single articulation point that contain no
         protected nodes (supports / loads).
 
-        This catches both simple dead-ends (degree ≤ 1 chains) **and**
+        This catches both simple dead-ends (degree <= 1 chains) **and**
         branches whose tip forms a small loop (e.g.
         ``1-2-3-4-5-6-5``), which ordinary leaf-node removal misses.
 
@@ -275,9 +275,9 @@ class Structure:
         2. For each articulation point, temporarily remove it and
            inspect the resulting connected components.
         3. Any component that contains **no protected node** is a
-           dangling branch — remove all its nodes.
+           dangling branch - remove all its nodes.
         4. Repeat until stable (cascading).
-        5. Final sweep: remove remaining degree-≤-1 non-protected
+        5. Final sweep: remove remaining degree-<=-1 non-protected
            leaf nodes iteratively.
 
         Returns
@@ -292,7 +292,7 @@ class Structure:
         while changed:
             changed = False
 
-            # --- Phase 1: dangling branches via articulation points ---
+            # Phase 1: dangling branches via articulation points
             if self.num_nodes < 2:
                 break
 
@@ -337,7 +337,7 @@ class Structure:
                         total_removed += 1
                         changed = True
 
-            # --- Phase 2: simple leaf-node sweep (degree ≤ 1) ---
+            # Phase 2: simple leaf-node sweep (degree <= 1)
             leaf_changed = True
             while leaf_changed:
                 leaf_changed = False

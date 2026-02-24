@@ -1,4 +1,4 @@
-"""Models package — Node, Spring, Structure."""
+"""Models package - Node, Spring, Structure."""
 
 from .node import Node
 from .spring import Spring

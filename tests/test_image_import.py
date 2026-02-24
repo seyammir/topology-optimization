@@ -1,4 +1,4 @@
-"""Tests for src.utils.image_import — image-to-structure conversion."""
+"""Tests for src.utils.image_import - image-to-structure conversion."""
 
 from __future__ import annotations
 
