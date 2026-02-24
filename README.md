@@ -69,8 +69,7 @@ topology-optimization/
 ├── README.md
 ├── LICENSE
 └── docs/
-    ├── Aufgabenstellung.pdf
-    └── plan.md
+    └── Aufgabenstellung.pdf
 ```
 
 ---
@@ -151,7 +150,7 @@ through `st.error()` / `st.warning()`.
 ### Error Handling
 
 Public APIs validate inputs and raise descriptive exceptions (`ValueError`,
-`KeyError`, `OSError`, …).  The Streamlit app wraps all I/O, solver, and
+`KeyError`, `OSError`, ...).  The Streamlit app wraps all I/O, solver, and
 rendering calls in `try / except` blocks so that failures are reported as
 friendly toast messages rather than raw tracebacks.
 

@@ -31,7 +31,7 @@ def save_state(structure: Structure, filepath: str | Path) -> None:
     Raises
     ------
     OSError
-        If the file cannot be written (permissions, disk full, …).
+        If the file cannot be written (permissions, disk full, ...).
     """
     data: dict[str, Any] = structure.to_dict()
     filepath = Path(filepath)

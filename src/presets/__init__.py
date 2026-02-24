@@ -1,4 +1,4 @@
-"""Presets package — ready-made benchmark structures."""
+"""Presets package - ready-made benchmark structures."""
 
 from .mbb_beam import create_mbb_beam
 

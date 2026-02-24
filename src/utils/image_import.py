@@ -59,7 +59,7 @@ def structure_from_image(
     """
     if width < 1 or height < 1:
         raise ValueError(
-            f"width and height must be ≥ 1, got width={width}, height={height}"
+            f"width and height must be >= 1, got width={width}, height={height}"
         )
 
     cols = width + 1  # number of node columns
@@ -79,7 +79,7 @@ def structure_from_image(
             "Use a darker image or lower the threshold."
         )
 
-    # 3) Create structure — place nodes only where material is True.
+    # 3) Create structure - place nodes only where material is True.
     struct = Structure()
     node_map: dict[tuple[int, int], Node] = {}
 
