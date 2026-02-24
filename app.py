@@ -110,6 +110,15 @@ if "comparison_results" not in st.session_state:
     st.session_state.comparison_results = {}
 if "algorithm" not in st.session_state:
     st.session_state.algorithm = "Node Removal (INR)"
+if "optimization_running" not in st.session_state:
+    st.session_state.optimization_running = False
+if "show_stop_toast" not in st.session_state:
+    st.session_state.show_stop_toast = False
+
+# Show stop toast from previous rerun
+if st.session_state.show_stop_toast:
+    st.toast("Optimization stopped.", icon="🔴")
+    st.session_state.show_stop_toast = False
 
 
 def _reset_state() -> None:
@@ -119,6 +128,7 @@ def _reset_state() -> None:
     st.session_state.node_energies = None
     st.session_state.iteration = 0
     st.session_state.comparison_results = {}
+    st.session_state.optimization_running = False
 
 
 # SIDEBAR
@@ -481,9 +491,11 @@ else:
 
 # Optimisation controls
 st.divider()
-ctrl_cols = st.columns([1, 1, 1, 1, 1])
+ctrl_cols = st.columns([1, 1, 1, 1, 1, 1])
 with ctrl_cols[0]:
-    run_full = st.button("▶️ Start Optimization", width='stretch')
+    run_full = st.button(
+        "▶️ Start", width='stretch', 
+        help="Run the optimization until completion.")
 with ctrl_cols[1]:
     run_step = st.button("⏩ Single Step", width='stretch')
 with ctrl_cols[2]:
@@ -492,10 +504,25 @@ with ctrl_cols[2]:
         help="Run both INR and SIMP on the same structure and compare results side-by-side.",
     )
 with ctrl_cols[3]:
-    do_reset = st.button("🔄 Reset", width='stretch')
+    force_stop = st.button(
+        "⏹️ Stop", width='stretch',
+        help="Force stop the running optimization.",
+    )
 with ctrl_cols[4]:
-    do_cleanup = st.button("🧹 Remove Dangling", width='stretch',
-                           help="Iteratively remove dead-end nodes that don't carry load.")
+    do_reset = st.button("🔄 Reset", width='stretch')
+with ctrl_cols[5]:
+    do_cleanup = st.button("🧹 Cleanup", width='stretch',
+                           help="Iteratively remove dead-end (dangling) nodes that don't carry load.")
+
+# Handle force-stop: discard progress, reset to initial structure
+if force_stop:
+    st.session_state.optimization_running = False
+    if st.session_state.initial_structure is not None:
+        st.session_state.structure = st.session_state.initial_structure.snapshot()
+    _reset_state()
+    logger.info("Optimization force-stopped by user.")
+    st.session_state.show_stop_toast = True
+    st.rerun()
 
 if do_reset and st.session_state.initial_structure is not None:
     st.session_state.structure = st.session_state.initial_structure.snapshot()
@@ -551,6 +578,7 @@ if run_full:
             struct = st.session_state.initial_structure.snapshot()
             st.session_state.structure = struct
 
+        st.session_state.optimization_running = True
         optimizer = _create_optimizer()
         progress_bar = st.progress(0.0)
         status_text = st.empty()
@@ -626,14 +654,17 @@ if run_full:
             )
         else:
             st.session_state.node_energies = TopologyOptimizer._compute_node_energies(struct, u)
+        st.session_state.optimization_running = False
         logger.info(
             "Optimization complete: algo=%s, %d iterations, %d nodes remaining",
             algo, result.iterations, struct.num_nodes,
         )
     except ValueError as exc:
+        st.session_state.optimization_running = False
         logger.exception("Invalid optimization parameters")
         st.error(f"Invalid optimization parameters: {exc}")
     except Exception:
+        st.session_state.optimization_running = False
         logger.exception("Optimization failed")
         st.error(
             "An unexpected error occurred during optimization. "
@@ -677,6 +708,7 @@ if run_compare:
     if st.session_state.initial_structure is None:
         st.error("Create a structure first before comparing algorithms.")
     else:
+        st.session_state.optimization_running = True
         # Safe defaults for algorithm-specific parameters
         _inr_removal = st.session_state.get("removal_rate", 3)
         # Try to read sidebar slider values; fall back to defaults
@@ -753,8 +785,10 @@ if run_compare:
                 "Comparison complete! Switch to the "
                 "🔬 Algorithm Comparison tab to see results."
             )
+            st.session_state.optimization_running = False
             logger.info("Both algorithms compared successfully")
         except Exception:
+            st.session_state.optimization_running = False
             logger.exception("Comparison run failed")
             st.error(
                 "An error occurred during the comparison run. "
