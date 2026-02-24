@@ -1,4 +1,4 @@
-"""Iterative topology optimiser.
+"""Iterative Node-Removal topology optimiser.
 
 Repeatedly: solve -> compute strain energies -> remove lowest-energy
 unprotected nodes -> validate connectivity.  Stops when the target mass
@@ -8,7 +8,6 @@ fraction is reached.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
 from typing import Callable
 
 import numpy as np
@@ -17,20 +16,12 @@ from ..models.node import Node
 from ..models.spring import Spring
 from ..models.structure import Structure
 from .fem_solver import FEMSolver
+from .optimizer_base import OptimizerBase, OptimizationResult  # noqa: F401 - re-export
 
 logger = logging.getLogger(__name__)
 
 
-@dataclass
-class OptimizationResult:
-    """Container returned by :meth:`TopologyOptimizer.optimize`."""
-    history: list[Structure] = field(default_factory=list)
-    energies_history: list[dict[int, float]] = field(default_factory=list)
-    compliance_history: list[float] = field(default_factory=list)
-    iterations: int = 0
-
-
-class TopologyOptimizer:
+class NodeRemovalOptimizer(OptimizerBase):
     """Remove low-energy nodes iteratively until the target mass is met.
 
     Parameters
@@ -52,12 +43,12 @@ class TopologyOptimizer:
         filter_radius: float = 1.5,
         solver: FEMSolver | None = None,
     ) -> None:
-        if not 0.0 < target_mass_fraction < 1.0:
-            raise ValueError("target_mass_fraction must be in (0, 1)")
-        self.target_mass_fraction = target_mass_fraction
+        super().__init__(
+            target_mass_fraction=target_mass_fraction,
+            filter_radius=filter_radius,
+            solver=solver,
+        )
         self.removal_per_iteration = max(1, removal_per_iteration)
-        self.filter_radius = max(0.0, filter_radius)
-        self.solver = solver if solver is not None else FEMSolver()
 
     # Public API
     def optimize(
@@ -81,7 +72,7 @@ class TopologyOptimizer:
         """
         initial_mass = structure.total_mass()
         target_mass = self.target_mass_fraction * initial_mass
-        result = OptimizationResult()
+        result = OptimizationResult(algorithm="Node Removal (INR)")
 
         # Store initial snapshot.
         result.history.append(structure.snapshot())
@@ -257,47 +248,7 @@ class TopologyOptimizer:
                 totals[nid] /= counts[nid]
         return totals
 
-    @staticmethod
-    def _filter_energies(
-        structure: Structure,
-        raw_energies: dict[int, float],
-        filter_radius: float = 3.0,
-    ) -> dict[int, float]:
-        r"""Spatial sensitivity filter (density-filter approach).
-
-        For each node *i* the filtered energy is:
-
-        .. math::
-
-            \tilde{e}_i = \frac{\sum_j w_{ij}\, e_j}{\sum_j w_{ij}}
-            \quad\text{with } w_{ij} = \max(0,\; r - d_{ij})
-
-        where *r* is ``filter_radius`` and *d* the Euclidean distance.
-
-        This prevents isolated low-energy nodes from being removed
-        when they are surrounded by high-energy members, which is the
-        standard regularisation technique in topology optimisation.
-        """
-        nodes = structure.get_nodes()
-        if not nodes:
-            return {}
-
-        nids = [n.id for n in nodes]
-        coords = np.array([[n.x, n.z] for n in nodes])  # (N, 2)
-        energies = np.array([raw_energies.get(n.id, 0.0) for n in nodes])  # (N,)
-
-        # Pairwise Euclidean distances  (N, N)
-        diff = coords[:, np.newaxis, :] - coords[np.newaxis, :, :]
-        dist = np.linalg.norm(diff, axis=2)
-
-        # Linear cone weights - nodes within radius get positive weight
-        weights = np.maximum(0.0, filter_radius - dist)
-
-        denom = weights.sum(axis=1)
-        denom[denom == 0] = 1.0  # avoid division by zero
-        filtered = (weights @ energies) / denom
-
-        return dict(zip(nids, filtered.tolist()))
+    # _filter_energies is inherited from OptimizerBase
 
     @staticmethod
     def _restore_node(
@@ -312,3 +263,8 @@ class TopologyOptimizer:
             # Only re-add if both end-nodes are (still) present.
             if ni.id in structure.graph and nj.id in structure.graph:
                 structure.graph.add_edge(ni.id, nj.id, obj=sp)
+
+
+# Backward-compatible alias - existing code importing TopologyOptimizer
+# continues to work without modification.
+TopologyOptimizer = NodeRemovalOptimizer
