@@ -28,6 +28,7 @@ from src.solver.simp_optimizer import SIMPOptimizer
 from src.utils.io_handler import state_to_json_string, structure_from_json_string
 from src.utils.image_import import structure_from_image
 from src.utils.visualization import Visualizer
+from src.utils.report_generator import generate_report
 from src.presets.mbb_beam import create_mbb_beam
 from streamlit_drawable_canvas import st_canvas
 
@@ -1340,3 +1341,74 @@ if result is not None and result.compliance_history:
     except Exception:
         logger.exception("Failed to render compliance history chart")
         st.error("Could not render the compliance history chart.")
+
+# Final report
+st.divider()
+st.subheader("📄 Final Report")
+st.caption(
+    "Generate a self-contained HTML report with all plots, "
+    "metrics, and parameters bundled into a single downloadable file."
+)
+
+_can_report = (
+    st.session_state.structure is not None
+    and (
+        st.session_state.result is not None
+        or st.session_state.displacement is not None
+    )
+)
+
+if _can_report:
+    if st.button("📄 Generate Report", key="gen_report", use_container_width=True):
+        try:
+            with st.spinner("Building report ..."):
+                # Collect current sidebar parameters
+                _algo = st.session_state.algorithm
+                _params: dict = {
+                    "target_mass_fraction": target_frac,
+                    "filter_radius": filter_radius,
+                }
+                if _algo == "SIMP":
+                    _params["penalization"] = simp_penalization
+                    _params["move_limit"] = simp_move_limit
+                    _params["convergence_tol"] = simp_convergence_tol
+                    _params["max_iterations"] = simp_max_iterations
+                else:
+                    _params["removal_per_iteration"] = removal_rate
+
+                html_report = generate_report(
+                    initial_structure=st.session_state.initial_structure,
+                    final_structure=st.session_state.structure,
+                    result=st.session_state.result,
+                    displacement=st.session_state.displacement,
+                    node_energies=st.session_state.node_energies,
+                    algorithm=_algo,
+                    parameters=_params,
+                    comparison_results=(
+                        st.session_state.comparison_results
+                        if st.session_state.comparison_results
+                        else None
+                    ),
+                    version=__version__,
+                )
+                st.session_state["report_html"] = html_report
+                logger.info("Final report generated successfully")
+        except Exception:
+            logger.exception("Failed to generate final report")
+            st.error("Could not generate the report. Check logs for details.")
+
+    if "report_html" in st.session_state and st.session_state["report_html"]:
+        st.download_button(
+            "⬇️ Download Report (HTML)",
+            data=st.session_state["report_html"],
+            file_name="topology_optimization_report.html",
+            mime="text/html",
+            key="dl_report",
+            use_container_width=True,
+        )
+        st.success("Report ready! Click above to download.")
+else:
+    st.info(
+        "Run an optimisation first, then come back here to generate "
+        "a comprehensive final report."
+    )
