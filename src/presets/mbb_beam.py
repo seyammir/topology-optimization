@@ -59,7 +59,7 @@ def create_mbb_beam(
         If *nx* or *nz* is less than 1, or *load* is zero.
     """
     if nx < 1 or nz < 1:
-        raise ValueError(f"nx and nz must be ≥ 1, got nx={nx}, nz={nz}")
+        raise ValueError(f"nx and nz must be >= 1, got nx={nx}, nz={nz}")
     if load == 0.0:
         raise ValueError("Load must be non-zero for a meaningful MBB beam")
 

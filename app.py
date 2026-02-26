@@ -22,17 +22,21 @@ from src import __version__
 from src.models.node import Node
 from src.models.structure import Structure
 from src.solver.fem_solver import FEMSolver
-from src.solver.optimizer import OptimizationResult, TopologyOptimizer
+from src.solver.optimizer import TopologyOptimizer
+from src.solver.optimizer_base import OptimizationResult
+from src.solver.simp_optimizer import SIMPOptimizer
 from src.utils.io_handler import state_to_json_string, structure_from_json_string
+from src.utils.image_import import structure_from_image
 from src.utils.visualization import Visualizer
+from src.utils.report_generator import generate_report
 from src.presets.mbb_beam import create_mbb_beam
+from streamlit_drawable_canvas import st_canvas
 
-# ---------------------------------------------------------------------------
+
 # Logging configuration
-# ---------------------------------------------------------------------------
 _LOG_DIR = Path("logs")
 _LOG_DIR.mkdir(exist_ok=True)
-_LOG_FMT = "%(asctime)s  %(levelname)-8s  %(name)s — %(message)s"
+_LOG_FMT = "%(asctime)s  %(levelname)-8s  %(name)s - %(message)s"
 _LOG_DATE = "%Y-%m-%d %H:%M:%S"
 
 logging.basicConfig(
@@ -58,16 +62,14 @@ st.set_page_config(
     layout="wide",
 )
 
-# ---------------------------------------------------------------------------
 # Custom CSS for a cleaner look
-# ---------------------------------------------------------------------------
 st.markdown(
     """
     <style>
     /* Tighten metrics row spacing (theme-aware) */
     div[data-testid="stMetric"] {
         background: color-mix(in srgb, var(--default-textColor) 6%, transparent);
-        border: 1px solid color-mix(in srgb, var(--default-textColor) 12%, transparent);
+        border: 1px solid rgba(128, 128, 128, 0.45);
         border-radius: 8px;
         padding: 10px 14px;
     }
@@ -97,6 +99,38 @@ if "upload_key" not in st.session_state:
     st.session_state.upload_key = 0
 if "show_upload_success" not in st.session_state:
     st.session_state.show_upload_success = False
+if "img_upload_key" not in st.session_state:
+    st.session_state.img_upload_key = 0
+if "show_img_upload_success" not in st.session_state:
+    st.session_state.show_img_upload_success = False
+if "canvas_key" not in st.session_state:
+    st.session_state.canvas_key = 0
+if "show_canvas_success" not in st.session_state:
+    st.session_state.show_canvas_success = False
+if "comparison_results" not in st.session_state:
+    st.session_state.comparison_results = {}
+if "algorithm" not in st.session_state:
+    st.session_state.algorithm = "Node Removal (INR)"
+if "optimization_running" not in st.session_state:
+    st.session_state.optimization_running = False
+if "show_stop_toast" not in st.session_state:
+    st.session_state.show_stop_toast = False
+if "step_info_message" not in st.session_state:
+    st.session_state.step_info_message = None
+
+# Show stop toast from previous rerun
+if st.session_state.show_stop_toast:
+    st.toast("Optimization stopped.", icon="🔴")
+    st.session_state.show_stop_toast = False
+
+# Show single-step info from previous rerun
+if st.session_state.step_info_message is not None:
+    _step_level, _step_msg = st.session_state.step_info_message
+    if _step_level == "success":
+        st.toast(_step_msg, icon="✅")
+    else:
+        st.toast(_step_msg, icon="⚠️")
+    st.session_state.step_info_message = None
 
 
 def _reset_state() -> None:
@@ -105,6 +139,38 @@ def _reset_state() -> None:
     st.session_state.displacement = None
     st.session_state.node_energies = None
     st.session_state.iteration = 0
+    st.session_state.comparison_results = {}
+    st.session_state.optimization_running = False
+    st.session_state.step_info_message = None
+    st.session_state.pop("animation_gif", None)
+    st.session_state.pop("animation_mode", None)
+
+
+def _has_valid_boundary_conditions(struct: Structure) -> bool:
+    """Return True if the structure has at least one support AND one load."""
+    nodes = struct.get_nodes()
+    if not nodes:
+        return False
+    return (
+        any(n.is_fixed for n in nodes)
+        and any(n.has_load for n in nodes)
+    )
+
+
+def _sync_boundary_conditions(source: Structure, target: Structure) -> None:
+    """Copy boundary conditions & forces from *source* nodes to *target* nodes.
+
+    Nodes are matched by their (x, z) grid position so that the full
+    initial topology can be restored while keeping user-defined BCs.
+    """
+    src_map = {(n.x, n.z): n for n in source.get_nodes()}
+    for node in target.get_nodes():
+        src_node = src_map.get((node.x, node.z))
+        if src_node is not None:
+            node.fixed_x = src_node.fixed_x
+            node.fixed_z = src_node.fixed_z
+            node.fx = src_node.fx
+            node.fz = src_node.fz
 
 
 # SIDEBAR
@@ -125,14 +191,50 @@ with st.sidebar:
         height = st.number_input("Height (cells)", 2, 60, 10, key="height")
 
     st.subheader("Optimization")
+    _algo_options = ["Node Removal (INR)", "SIMP"]
+    _algo_index = 0
+    _pending = st.session_state.pop("_pending_algorithm", None)
+    if _pending and _pending in _algo_options:
+        _algo_index = _algo_options.index(_pending)
+        # Remove the widget key so Streamlit respects the new index.
+        st.session_state.pop("algorithm", None)
+    algorithm = st.selectbox(
+        "Algorithm",
+        _algo_options,
+        index=_algo_index,
+        key="algorithm",
+        help="Select the topology optimisation algorithm to use.",
+    )
     target_frac = st.slider(
         "Target Mass Fraction", 0.1, 0.9, 0.5, 0.05,
         help="Fraction of the original mass to be retained.",
     )
-    removal_rate = st.slider(
-        "Removal Rate per Iteration", 1, 20, 3,
-        help="Maximum number of nodes removed per step. Lower values = better topology, but slower.",
-    )
+
+    # Algorithm-specific parameters
+    if algorithm == "Node Removal (INR)":
+        removal_rate = st.slider(
+            "Removal Rate per Iteration", 1, 20, 3,
+            help="Maximum number of nodes removed per step. Lower values = better topology, but slower.",
+        )
+    else:  # SIMP
+        simp_penalization = st.slider(
+            "Penalization Power (p)", 1.0, 5.0, 3.0, 0.5,
+            help="SIMP penalization exponent. Higher values push densities towards 0/1.",
+        )
+        simp_move_limit = st.slider(
+            "Move Limit", 0.05, 0.5, 0.2, 0.05,
+            help="Maximum density change per element per iteration.",
+        )
+        simp_convergence_tol = st.slider(
+            "Convergence Tolerance", 0.001, 0.1, 0.01, 0.001,
+            format="%.3f",
+            help="Stop when max density change falls below this value.",
+        )
+        simp_max_iterations = st.number_input(
+            "Max Iterations", min_value=10, max_value=1000, value=200, step=10,
+            help="Maximum number of SIMP iterations. The algorithm may stop earlier if convergence is reached.",
+        )
+
     filter_radius = st.slider(
         "Filter Radius", 0.0, 6.0, 1.5, 0.5,
         help="Spatial sensitivity filter: smooths the energy distribution "
@@ -140,7 +242,7 @@ with st.sidebar:
     )
 
     # Create / preset buttons
-    if st.button("🔨 Create Structure", use_container_width=True):
+    if st.button("🔨 Create Structure", width='stretch'):
         _reset_state()
         st.session_state.editor_gen += 1  # invalidate old editor widget keys
         try:
@@ -164,13 +266,17 @@ with st.sidebar:
     # Download
     if st.session_state.structure is not None:
         try:
-            json_str = state_to_json_string(st.session_state.structure)
+            json_str = state_to_json_string(
+                st.session_state.structure,
+                result=st.session_state.result,
+                initial_structure=st.session_state.initial_structure,
+            )
             st.download_button(
                 "⬇️ Download State (JSON)",
                 data=json_str,
                 file_name="topology_state.json",
                 mime="application/json",
-                use_container_width=True,
+                width='stretch',
             )
         except Exception:
             logger.exception("Failed to serialise structure for download")
@@ -190,9 +296,50 @@ with st.sidebar:
     if uploaded is not None:
         try:
             content = uploaded.read().decode("utf-8")
-            st.session_state.structure = structure_from_json_string(content)
-            st.session_state.initial_structure = st.session_state.structure.snapshot()
+            loaded_struct, loaded_result, loaded_initial = structure_from_json_string(content)
+            st.session_state.structure = loaded_struct
+            # Use the saved initial structure if present; otherwise
+            # fall back to a copy of the loaded (current) structure.
+            if loaded_initial is not None:
+                st.session_state.initial_structure = loaded_initial
+            else:
+                st.session_state.initial_structure = loaded_struct.snapshot()
             _reset_state()
+            # Restore optimisation result if present in the file.
+            if loaded_result is not None:
+                st.session_state.result = loaded_result
+                # Queue algorithm selection for next rerun (cannot
+                # modify a widget key after the widget is instantiated).
+                if loaded_result.algorithm == "SIMP":
+                    st.session_state._pending_algorithm = "SIMP"
+                elif loaded_result.algorithm:
+                    st.session_state._pending_algorithm = "Node Removal (INR)"
+                # Re-solve for displacement so all plots work.
+                try:
+                    loaded_struct.renumber_dofs()
+                    solver = FEMSolver()
+                    if loaded_result.algorithm == "SIMP" and loaded_result.densities:
+                        u = solver.solve_with_densities(
+                            loaded_struct, loaded_result.densities,
+                        )
+                        st.session_state.node_energies = (
+                            SIMPOptimizer._compute_node_energies_from_densities(
+                                loaded_struct, u, loaded_result.densities,
+                            )
+                        )
+                    else:
+                        u = solver.solve(loaded_struct)
+                        st.session_state.node_energies = (
+                            TopologyOptimizer._compute_node_energies(
+                                loaded_struct, u,
+                            )
+                        )
+                    st.session_state.displacement = u
+                except Exception:
+                    logger.warning(
+                        "Could not re-solve loaded state; visualisations "
+                        "may be incomplete."
+                    )
             logger.info("State loaded from uploaded file")
             # Set flag to show success message after rerun
             st.session_state.show_upload_success = True
@@ -205,10 +352,120 @@ with st.sidebar:
             st.error("The uploaded file is not valid JSON. Please check the file format.")
         except KeyError as exc:
             logger.exception("Uploaded JSON is missing required fields")
-            st.error(f"Invalid state file — missing data: {exc}")
+            st.error(f"Invalid state file - missing data: {exc}")
         except Exception as exc:
             logger.exception("Unexpected error loading uploaded state")
             st.error(f"Could not load state: {exc}")
+
+    # Image import
+    st.divider()
+    st.subheader("🖼️ Import from Image")
+    st.caption(
+        "Upload a **black & white** image.  "
+        "Black pixels -> material, white pixels -> void.  "
+        "The image is resized to the grid dimensions above."
+    )
+    if st.session_state.show_img_upload_success:
+        st.toast("Structure imported from image!", icon="✅")
+        st.session_state.show_img_upload_success = False
+
+    img_threshold = st.slider(
+        "BW Threshold", 0, 255, 128,
+        help="Grey-value cut-off (0-255). Pixels darker than this are material.",
+    )
+    img_file = st.file_uploader(
+        "Upload Image",
+        type=["png", "jpg", "jpeg", "bmp", "gif", "tiff"],
+        key=f"img_uploader_{st.session_state.img_upload_key}",
+    )
+    if img_file is not None:
+        try:
+            struct_img = structure_from_image(
+                img_file, width=width, height=height, threshold=img_threshold,
+            )
+            st.session_state.structure = struct_img
+            st.session_state.initial_structure = struct_img.snapshot()
+            _reset_state()
+            st.session_state.editor_gen += 1
+            logger.info(
+                "Structure imported from image: %dx%d, %d nodes",
+                width, height, struct_img.num_nodes,
+            )
+            st.session_state.show_img_upload_success = True
+            st.session_state.img_upload_key += 1
+            st.rerun()
+        except ValueError as exc:
+            st.error(str(exc))
+        except Exception as exc:
+            logger.exception("Failed to import structure from image")
+            st.error(f"Could not import image: {exc}")
+
+    # Draw structure
+    st.divider()
+    st.subheader("✏️ Draw Structure")
+    st.caption(
+        "Draw your shape below (black = material).  "
+        "Click **Apply Drawing** when done."
+    )
+    if st.session_state.show_canvas_success:
+        st.toast("Structure created from drawing!", icon="✅")
+        st.session_state.show_canvas_success = False
+
+    drawing_mode = st.selectbox(
+        "Drawing Tool",
+        ["freedraw", "rect", "circle", "line", "transform"],
+        format_func=lambda m: {
+            "freedraw": "✏️ Freehand",
+            "rect": "⬜ Rectangle",
+            "circle": "⭕ Circle",
+            "line": "📏 Line",
+            "transform": "🔄 Move / Resize",
+        }[m],
+    )
+
+    canvas_result = st_canvas(
+        fill_color="#000000",
+        stroke_width=st.slider("Brush Size", 1, 30, 10, key="brush_size"),
+        stroke_color="#000000",
+        background_color="#FFFFFF",
+        width=300,
+        height=200,
+        drawing_mode=drawing_mode,
+        key=f"canvas_{st.session_state.canvas_key}",
+    )
+
+    if st.button("🎨 Apply Drawing", width='stretch'):
+        if canvas_result.image_data is not None:
+            try:
+                from PIL import Image as PILImage
+                import io
+                # canvas returns RGBA numpy array; convert to greyscale PNG
+                rgba = canvas_result.image_data.astype(np.uint8)
+                img = PILImage.fromarray(rgba, "RGBA").convert("L")
+                buf = io.BytesIO()
+                img.save(buf, format="PNG")
+                buf.seek(0)
+                struct_drawn = structure_from_image(
+                    buf, width=width, height=height, threshold=img_threshold,
+                )
+                st.session_state.structure = struct_drawn
+                st.session_state.initial_structure = struct_drawn.snapshot()
+                _reset_state()
+                st.session_state.editor_gen += 1
+                st.session_state.canvas_key += 1
+                logger.info(
+                    "Structure created from canvas drawing: %dx%d, %d nodes",
+                    width, height, struct_drawn.num_nodes,
+                )
+                st.session_state.show_canvas_success = True
+                st.rerun()
+            except ValueError as exc:
+                st.error(str(exc))
+            except Exception as exc:
+                logger.exception("Failed to create structure from drawing")
+                st.error(f"Could not create structure from drawing: {exc}")
+        else:
+            st.warning("Please draw something on the canvas first.")
 
     # About
     st.divider()
@@ -218,7 +475,7 @@ with st.sidebar:
 # MAIN AREA
 st.title("2-D Topology Optimization")
 st.caption(
-    "Mass-Spring Model  ·  Iterative Node Removal  ·  FEM Solver  ·  "
+    "Mass-Spring Model | INR / SIMP Algorithms | FEM Solver | "
     f"v{__version__}"
 )
 
@@ -279,30 +536,174 @@ with st.expander("🔧 Edit Boundary Conditions & Forces", expanded=False):
     else:
         st.warning("No node found at this position.")
 
+    # Quick-apply default boundary conditions
+    st.divider()
+    st.markdown("**Quick Setup** - apply standard boundary conditions automatically:")
+
+    bc_preset = st.selectbox(
+        "BC Preset",
+        ["MBB Beam (full)", "MBB Beam (half symmetry)"],
+        key=f"bc_preset_{_g}",
+        help=(
+            "**Full MBB**: Pin bottom-left, roller bottom-right, load at top-centre.\n\n"
+            "**Half MBB**: Left edge fixed in x (symmetry rollers), "
+            "roller bottom-right, load at top-left corner."
+        ),
+    )
+
+    if st.button("⚡ Apply Default Boundary Conditions", key=f"auto_bc_{_g}"):
+        _all = struct.get_nodes()
+        if _all:
+            # Clear existing BCs first
+            for n in _all:
+                n.fixed_x = False
+                n.fixed_z = False
+                n.fx = 0.0
+                n.fz = 0.0
+
+            min_x = min(n.x for n in _all)
+            max_x = max(n.x for n in _all)
+            max_z = max(n.z for n in _all)  # bottom (z points down)
+            min_z = min(n.z for n in _all)  # top
+
+            if bc_preset == "MBB Beam (half symmetry)":
+                # Left edge: all nodes fixed in x (symmetry rollers)
+                for n in _all:
+                    if n.x == min_x:
+                        n.fixed_x = True
+                # Roller bottom-right
+                br = min((n for n in _all if n.x == max_x and n.z == max_z),
+                         key=lambda n: n.id, default=None)
+                if br:
+                    br.fixed_z = True
+                # Force at top-left corner
+                tl = min((n for n in _all if n.x == min_x and n.z == min_z),
+                         key=lambda n: n.id, default=None)
+                if tl:
+                    tl.fz = 1.0
+                logger.info("Applied half-MBB boundary conditions")
+            else:
+                # Full MBB beam
+                # Pin bottom-left
+                bl = min((n for n in _all if n.x == min_x and n.z == max_z),
+                         key=lambda n: n.id, default=None)
+                if bl:
+                    bl.fixed_x = True
+                    bl.fixed_z = True
+                # Roller bottom-right
+                br = min((n for n in _all if n.x == max_x and n.z == max_z),
+                         key=lambda n: n.id, default=None)
+                if br:
+                    br.fixed_z = True
+                # Force at top-centre
+                mid_x = (min_x + max_x) / 2.0
+                top_nodes = [n for n in _all if n.z == min_z]
+                if top_nodes:
+                    centre = min(top_nodes, key=lambda n: abs(n.x - mid_x))
+                    centre.fz = 1.0
+                logger.info("Applied full-MBB boundary conditions")
+
+            st.session_state.initial_structure = struct.snapshot()
+            st.session_state.editor_gen += 1
+            logger.info("Applied default MBB boundary conditions")
+            st.rerun()
+
+# Show a warning if boundary conditions are missing
+if not _has_valid_boundary_conditions(struct):
+    _nodes = struct.get_nodes()
+    _missing = []
+    if not any(n.is_fixed for n in _nodes):
+        _missing.append("**supports** (Fixed x / Fixed z)")
+    if not any(n.has_load for n in _nodes):
+        _missing.append("**forces** (Fx or Fz)")
+    st.warning(
+        "⚠️ Missing boundary conditions: " + " and ".join(_missing) + ". "
+        "Open **🔧 Edit Boundary Conditions & Forces** above to set them "
+        "before running the optimization."
+    )
+
 # Summary metrics
+st.divider()
 col_m1, col_m2, col_m3, col_m4 = st.columns(4)
-col_m1.metric("Nodes", struct.num_nodes)
-col_m2.metric("Springs", struct.graph.number_of_edges())
-col_m3.metric("Mass [kg]", f"{struct.total_mass():.0f}")
-init_mass = (
-    st.session_state.initial_structure.total_mass()
-    if st.session_state.initial_structure else struct.total_mass()
+
+_res = st.session_state.result
+_is_simp_result = (
+    st.session_state.algorithm == "SIMP"
+    and _res is not None
+    and _res.densities is not None
 )
-frac = struct.total_mass() / init_mass if init_mass else 0
-col_m4.metric("Mass Fraction", f"{frac:.1%}")
+
+if _is_simp_result:
+    # For SIMP: show effective (density-weighted) metrics
+    _dens = _res.densities
+    _threshold = 0.1  # springs below this density are considered void
+    _active_springs = sum(1 for d in _dens.values() if d >= _threshold)
+    # Effective mass = sum of density * spring_length (= node mass proxy)
+    _springs_list = struct.get_springs()
+    _eff_mass = sum(
+        _dens.get(sp.node_ids, _dens.get((sp.node_ids[1], sp.node_ids[0]), 1.0)) * sp.length
+        for sp in _springs_list
+    )
+    _total_mass = sum(sp.length for sp in _springs_list)
+    # Active nodes: nodes connected to at least one active spring
+    _active_nodes = set()
+    for sp in _springs_list:
+        key = sp.node_ids
+        rkey = (key[1], key[0])
+        xe = _dens.get(key, _dens.get(rkey, 1.0))
+        if xe >= _threshold:
+            _active_nodes.add(key[0])
+            _active_nodes.add(key[1])
+    col_m1.metric("Active Nodes", len(_active_nodes), help="Nodes with density >= 0.1")
+    col_m2.metric("Active Springs", _active_springs, help="Springs with density >= 0.1")
+    col_m3.metric("Eff. Mass", f"{_eff_mass:.0f}", help="Density-weighted total spring length")
+    _frac_simp = _eff_mass / _total_mass if _total_mass > 0 else 0
+    col_m4.metric("Mass Fraction", f"{_frac_simp:.1%}")
+else:
+    col_m1.metric("Nodes", struct.num_nodes)
+    col_m2.metric("Springs", struct.graph.number_of_edges())
+    col_m3.metric("Mass [kg]", f"{struct.total_mass():.0f}")
+    init_mass = (
+        st.session_state.initial_structure.total_mass()
+        if st.session_state.initial_structure else struct.total_mass()
+    )
+    frac = struct.total_mass() / init_mass if init_mass else 0
+    col_m4.metric("Mass Fraction", f"{frac:.1%}")
 
 # Optimisation controls
 st.divider()
-ctrl_cols = st.columns([1, 1, 1, 1])
+ctrl_cols = st.columns([1, 1, 1, 1, 1, 1])
 with ctrl_cols[0]:
-    run_full = st.button("▶️ Start Optimization", use_container_width=True)
+    run_full = st.button(
+        "▶️ Start", width='stretch', 
+        help="Run the optimization until completion.")
 with ctrl_cols[1]:
-    run_step = st.button("⏩ Single Step", use_container_width=True)
+    run_step = st.button("⏩ Single Step", width='stretch')
 with ctrl_cols[2]:
-    do_reset = st.button("🔄 Reset", use_container_width=True)
+    run_compare = st.button(
+        "🔬 Compare Both", width='stretch',
+        help="Run both INR and SIMP on the same structure and compare results side-by-side.",
+    )
 with ctrl_cols[3]:
-    do_cleanup = st.button("🧹 Remove Dangling", use_container_width=True,
-                           help="Iteratively remove dead-end nodes that don't carry load.")
+    force_stop = st.button(
+        "⏹️ Stop", width='stretch',
+        help="Force stop the running optimization.",
+    )
+with ctrl_cols[4]:
+    do_reset = st.button("🔄 Reset", width='stretch')
+with ctrl_cols[5]:
+    do_cleanup = st.button("🧹 Cleanup", width='stretch',
+                           help="Iteratively remove dead-end (dangling) nodes that don't carry load.")
+
+# Handle force-stop: discard progress, reset to initial structure
+if force_stop:
+    st.session_state.optimization_running = False
+    if st.session_state.initial_structure is not None:
+        st.session_state.structure = st.session_state.initial_structure.snapshot()
+    _reset_state()
+    logger.info("Optimization force-stopped by user.")
+    st.session_state.show_stop_toast = True
+    st.rerun()
 
 if do_reset and st.session_state.initial_structure is not None:
     st.session_state.structure = st.session_state.initial_structure.snapshot()
@@ -328,97 +729,295 @@ if do_cleanup:
         st.error("An error occurred while removing dangling nodes. Check logs for details.")
     st.rerun()
 
-# Full optimisation run
-if run_full:
-    try:
-        optimizer = TopologyOptimizer(
+# Helper: create the right optimizer based on sidebar selection
+def _create_optimizer():
+    """Instantiate the optimizer selected in the sidebar."""
+    algo = st.session_state.algorithm
+    if algo == "SIMP":
+        return SIMPOptimizer(
+            target_mass_fraction=target_frac,
+            filter_radius=filter_radius,
+            penalization=simp_penalization,
+            move_limit=simp_move_limit,
+            convergence_tol=simp_convergence_tol,
+            max_iterations=simp_max_iterations,
+        )
+    else:  # Node Removal (INR)
+        return TopologyOptimizer(
             target_mass_fraction=target_frac,
             removal_per_iteration=removal_rate,
             filter_radius=filter_radius,
         )
-        progress_bar = st.progress(0.0)
-        status_text = st.empty()
-        initial_mass = struct.total_mass()
-        target_mass = target_frac * initial_mass
 
-        def _cb(s: Structure, it: int, ne: dict[int, float]) -> None:
-            frac_done = 1.0 - (s.total_mass() - target_mass) / (initial_mass - target_mass)
-            frac_done = max(0.0, min(1.0, frac_done))
-            progress_bar.progress(frac_done)
-            status_text.text(
-                f"Iteration {it} — Nodes: {s.num_nodes}, "
-                f"Mass: {s.total_mass():.0f}/{target_mass:.0f}"
+# Validate boundary conditions before any optimisation action
+_bc_ok = _has_valid_boundary_conditions(struct)
+_bc_msg = (
+    "The structure has no boundary conditions set. "
+    "Please open **🔧 Edit Boundary Conditions & Forces** above "
+    "and assign at least one **support** (Fixed x / Fixed z) "
+    "and one **force** (Fx or Fz) before running the optimization."
+)
+
+# Full optimisation run
+if run_full:
+    if not _bc_ok:
+        st.error(_bc_msg)
+    else:
+        try:
+            # Always reset to initial structure so that repeated /
+            # comparative runs are independent of each other.
+            algo = st.session_state.algorithm
+            if st.session_state.initial_structure is not None:
+                # Preserve user-defined BCs on the full initial topology
+                _sync_boundary_conditions(st.session_state.structure,
+                                          st.session_state.initial_structure)
+                struct = st.session_state.initial_structure.snapshot()
+                st.session_state.structure = struct
+
+            st.session_state.optimization_running = True
+            optimizer = _create_optimizer()
+            progress_bar = st.progress(0.0)
+            status_text = st.empty()
+            initial_mass = struct.total_mass()
+            target_mass = target_frac * initial_mass
+
+            def _cb(s: Structure, it: int, ne: dict[int, float]) -> None:
+                if algo == "SIMP":
+                    max_it = optimizer.max_iterations
+                    frac_done = min(1.0, it / max_it)
+                    progress_bar.progress(frac_done)
+                    # Compute current volume fraction from densities
+                    dens = getattr(s, "_simp_densities", None)
+                    vols = getattr(s, "_simp_spring_volumes", None)
+                    if dens and vols:
+                        cur_vol = sum(dens[k] * vols[k] for k in dens)
+                        tot_vol = sum(vols.values())
+                        active = sum(1 for d in dens.values() if d >= 0.1)
+                        status_text.text(
+                            f"[SIMP] Iteration {it}/{max_it} - "
+                            f"Active Springs: {active}, "
+                            f"Mass: {cur_vol:.0f}/{target_mass:.0f}"
+                        )
+                    else:
+                        status_text.text(f"[SIMP] Iteration {it}/{max_it}")
+                else:
+                    frac_done = 1.0 - (s.total_mass() - target_mass) / (initial_mass - target_mass)
+                    frac_done = max(0.0, min(1.0, frac_done))
+                    progress_bar.progress(frac_done)
+                    status_text.text(
+                        f"[{algo}] Iteration {it} - "
+                        f"Nodes: {s.num_nodes}, "
+                        f"Mass: {s.total_mass():.0f}/{target_mass:.0f}"
+                    )
+
+            logger.info(
+                "Starting optimization: algo=%s, target=%.0f%%, filter=%.1f",
+                algo, target_frac * 100, filter_radius,
             )
+            result = optimizer.optimize(struct, callback=_cb)
+            progress_bar.progress(1.0)
+            if algo == "SIMP" and result.densities:
+                _active_final = sum(1 for d in result.densities.values() if d >= 0.1)
+                _c_final = result.compliance_history[-1] if result.compliance_history else 0
+                status_text.text(
+                    f"Done! [SIMP] after {result.iterations} iterations - "
+                    f"Active Springs: {_active_final}/{len(result.densities)}, "
+                    f"Compliance: {_c_final:.4g}"
+                )
+            else:
+                status_text.text(
+                    f"Done! [{algo}] after {result.iterations} iterations - "
+                    f"{struct.num_nodes} nodes remaining."
+                )
+            st.session_state.result = result
 
-        logger.info(
-            "Starting optimization: target=%.0f%%, removal_rate=%d, filter=%.1f",
-            target_frac * 100, removal_rate, filter_radius,
-        )
-        result = optimizer.optimize(struct, callback=_cb)
-        progress_bar.progress(1.0)
-        status_text.text(
-            f"✅ Done after {result.iterations} iterations — "
-            f"{struct.num_nodes} nodes remaining."
-        )
-        st.session_state.result = result
+            # Store in comparison dict
+            st.session_state.comparison_results[algo] = result
 
-        # Solve once more for final displacement.
-        struct.renumber_dofs()
-        solver = FEMSolver()
-        u = solver.solve(struct)
-        st.session_state.displacement = u
+            # Solve once more for final displacement.
+            struct.renumber_dofs()
+            solver = FEMSolver()
+            if algo == "SIMP" and result.densities:
+                u = solver.solve_with_densities(struct, result.densities)
+            else:
+                u = solver.solve(struct)
+            st.session_state.displacement = u
 
-        # Final node energies.
-        st.session_state.node_energies = TopologyOptimizer._compute_node_energies(struct, u)
-        logger.info(
-            "Optimization complete: %d iterations, %d nodes remaining",
-            result.iterations, struct.num_nodes,
-        )
-    except ValueError as exc:
-        logger.exception("Invalid optimization parameters")
-        st.error(f"Invalid optimization parameters: {exc}")
-    except Exception:
-        logger.exception("Optimization failed")
-        st.error(
-            "An unexpected error occurred during optimization. "
-            "Please check the structure setup and try again."
-        )
-    st.rerun()
+            # Final node energies.
+            if algo == "SIMP" and result.densities:
+                st.session_state.node_energies = SIMPOptimizer._compute_node_energies_from_densities(
+                    struct, u, result.densities,
+                )
+            else:
+                st.session_state.node_energies = TopologyOptimizer._compute_node_energies(struct, u)
+            st.session_state.optimization_running = False
+            logger.info(
+                "Optimization complete: algo=%s, %d iterations, %d nodes remaining",
+                algo, result.iterations, struct.num_nodes,
+            )
+        except ValueError as exc:
+            st.session_state.optimization_running = False
+            logger.exception("Invalid optimization parameters")
+            st.error(f"Invalid optimization parameters: {exc}")
+        except Exception:
+            st.session_state.optimization_running = False
+            logger.exception("Optimization failed")
+            st.error(
+                "An unexpected error occurred during optimization. "
+                "Please check the structure setup and try again."
+            )
+        st.rerun()
 
 # Single step
 if run_step:
-    try:
-        optimizer = TopologyOptimizer(
-            target_mass_fraction=target_frac,
-            removal_per_iteration=removal_rate,
-            filter_radius=filter_radius,
-        )
-        u, ne, removed = optimizer.step(struct)
-        st.session_state.displacement = u
-        st.session_state.node_energies = ne
-        st.session_state.iteration += 1
-        if removed == 0:
-            st.warning("No node could be removed — the structure may already be at its minimum.")
-        else:
-            st.success(f"Step {st.session_state.iteration}: {removed} nodes removed.")
-            logger.info("Single step %d: removed %d nodes", st.session_state.iteration, removed)
-    except ValueError as exc:
-        logger.exception("Invalid parameters for single step")
-        st.error(f"Invalid parameters: {exc}")
-    except Exception:
-        logger.exception("Single-step optimization failed")
-        st.error("An error occurred during the optimization step.")
-    st.rerun()
+    if not _bc_ok:
+        st.error(_bc_msg)
+    else:
+        try:
+            optimizer = _create_optimizer()
+            u, ne, removed = optimizer.step(struct)
+            st.session_state.displacement = u
+            st.session_state.node_energies = ne
+            st.session_state.iteration += 1
+            algo = st.session_state.algorithm
+            if removed == 0 and algo != "SIMP":
+                st.session_state.step_info_message = (
+                    "warning",
+                    "No element could be removed - the structure may already be at its minimum.",
+                )
+            elif algo == "SIMP":
+                dens = getattr(struct, "_simp_densities", {})
+                active = sum(1 for d in dens.values() if d >= 0.1)
+                st.session_state.step_info_message = (
+                    "success",
+                    f"[SIMP] Step {st.session_state.iteration}: "
+                    f"Active Springs: {active}/{len(dens)}",
+                )
+                logger.info("[SIMP] Single step %d: active springs %d/%d",
+                            st.session_state.iteration, active, len(dens))
+            else:
+                st.session_state.step_info_message = (
+                    "success",
+                    f"[{algo}] Step {st.session_state.iteration}: {removed} elements removed.",
+                )
+                logger.info("[%s] Single step %d: removed %d elements", algo, st.session_state.iteration, removed)
+        except ValueError as exc:
+            logger.exception("Invalid parameters for single step")
+            st.error(f"Invalid parameters: {exc}")
+        except Exception:
+            logger.exception("Single-step optimization failed")
+            st.error("An error occurred during the optimization step.")
+        st.rerun()
+
+# Compare Both algorithms
+if run_compare:
+    if not _bc_ok:
+        st.error(_bc_msg)
+    elif st.session_state.initial_structure is None:
+        st.error("Create a structure first before comparing algorithms.")
+    else:
+        st.session_state.optimization_running = True
+        # Safe defaults for algorithm-specific parameters
+        _inr_removal = st.session_state.get("removal_rate", 3)
+        # Try to read sidebar slider values; fall back to defaults
+        _simp_pen = st.session_state.get("simp_penalization", 3.0)
+        _simp_ml = st.session_state.get("simp_move_limit", 0.2)
+        _simp_ct = st.session_state.get("simp_convergence_tol", 0.01)
+        _simp_mi = st.session_state.get("simp_max_iterations", 200)
+
+        st.session_state.comparison_results = {}
+        progress_bar = st.progress(0.0)
+        status_text = st.empty()
+
+        algo_specs = [
+            (
+                "Node Removal (INR)",
+                lambda: TopologyOptimizer(
+                    target_mass_fraction=target_frac,
+                    removal_per_iteration=_inr_removal,
+                    filter_radius=filter_radius,
+                ),
+            ),
+            (
+                "SIMP",
+                lambda: SIMPOptimizer(
+                    target_mass_fraction=target_frac,
+                    filter_radius=filter_radius,
+                    penalization=_simp_pen,
+                    move_limit=_simp_ml,
+                    convergence_tol=_simp_ct,
+                    max_iterations=_simp_mi,
+                ),
+            ),
+        ]
+
+        try:
+            for step_idx, (algo_name, make_opt) in enumerate(algo_specs):
+                status_text.text(f"Running {algo_name}...")
+                progress_bar.progress(step_idx / 2)
+
+                # Preserve BCs, then take a fresh copy of the initial topology
+                _sync_boundary_conditions(st.session_state.structure,
+                                          st.session_state.initial_structure)
+                run_struct = st.session_state.initial_structure.snapshot()
+                optimizer = make_opt()
+
+                initial_mass = run_struct.total_mass()
+                target_mass_val = target_frac * initial_mass
+
+                def _cmp_cb(s, it, ne, _algo=algo_name, _opt=optimizer, _si=step_idx):
+                    if _algo == "SIMP":
+                        max_it = _opt.max_iterations
+                        frac_done = min(1.0, it / max_it) if max_it else 0.0
+                        progress_bar.progress((_si + frac_done) / 2)
+                        status_text.text(f"[{_algo}] Iteration {it}/{max_it}")
+                    else:
+                        im = initial_mass
+                        tm = target_mass_val
+                        frac_done = 1.0 - (s.total_mass() - tm) / (im - tm) if im != tm else 1.0
+                        frac_done = max(0.0, min(1.0, frac_done))
+                        progress_bar.progress((_si + frac_done) / 2)
+                        status_text.text(
+                            f"[{_algo}] Iteration {it} - "
+                            f"Nodes: {s.num_nodes}, "
+                            f"Mass: {s.total_mass():.0f}/{tm:.0f}"
+                        )
+
+                result = optimizer.optimize(run_struct, callback=_cmp_cb)
+                st.session_state.comparison_results[algo_name] = result
+                logger.info(
+                    "Comparison run complete: algo=%s, %d iterations",
+                    algo_name, result.iterations,
+                )
+
+            progress_bar.progress(1.0)
+            status_text.text(
+                "Comparison complete! Switch to the "
+                "🔬 Algorithm Comparison tab to see results."
+            )
+            st.session_state.optimization_running = False
+            logger.info("Both algorithms compared successfully")
+        except Exception:
+            st.session_state.optimization_running = False
+            logger.exception("Comparison run failed")
+            st.error(
+                "An error occurred during the comparison run. "
+                "Please check the structure setup and try again."
+            )
+        st.rerun()
 
 # Visualisation tabs
 st.divider()
-tab_init, tab_current, tab_deformed, tab_heatmap, tab_bw = st.tabs(
+tab_init, tab_current, tab_deformed, tab_heatmap, tab_loadpath, tab_bw, tab_density, tab_compare = st.tabs(
     [
         "📐 Initial Structure",
         "🏗️ Current Structure",
         "📏 Deformation",
         "🌡️ Strain Energy",
+        "⚡ Internal Forces",
         "⬛ B/W Density",
+        "🎨 Density Field",
+        "🔬 Algorithm Comparison",
     ]
 )
 
@@ -446,7 +1045,13 @@ with tab_init:
 
 with tab_current:
     try:
-        fig_cur = Visualizer.plot_structure(struct, title="Current Structure")
+        if _is_simp_result:
+            fig_cur = Visualizer.plot_structure(
+                struct, title="Current Structure",
+                densities=st.session_state.result.densities,
+            )
+        else:
+            fig_cur = Visualizer.plot_structure(struct, title="Current Structure")
         st.pyplot(fig_cur)
 
         st.write("")
@@ -464,19 +1069,41 @@ with tab_current:
         st.error("Could not render the current structure plot.")
 
 with tab_deformed:
+    _is_simp = st.session_state.algorithm == "SIMP" and (
+        st.session_state.result is not None
+        and st.session_state.result.densities is not None
+    )
     u = st.session_state.displacement
     if u is not None:
         try:
             auto_scale = st.checkbox("Auto Scaling", value=True, key="auto_scale")
-            if auto_scale:
-                fig_def = Visualizer.plot_structure(
-                    struct, u=u, scale=0, title="Deformed Structure (auto-scaled)"
-                )
+            if _is_simp:
+                # For SIMP: show density-weighted deformed structure
+                _dens_def = st.session_state.result.densities
+                _pen_def = st.session_state.result.penalization
+                if auto_scale:
+                    fig_def = Visualizer.plot_structure(
+                        struct, u=u, scale=0,
+                        title="Deformed Structure (auto-scaled)",
+                        densities=_dens_def,
+                    )
+                else:
+                    scale = st.slider("Magnification Factor", 1.0, 500.0, 50.0, 1.0, key="def_scale")
+                    fig_def = Visualizer.plot_structure(
+                        struct, u=u, scale=scale,
+                        title="Deformed Structure",
+                        densities=_dens_def,
+                    )
             else:
-                scale = st.slider("Magnification Factor", 1.0, 500.0, 50.0, 1.0, key="def_scale")
-                fig_def = Visualizer.plot_structure(
-                    struct, u=u, scale=scale, title="Deformed Structure"
-                )
+                if auto_scale:
+                    fig_def = Visualizer.plot_structure(
+                        struct, u=u, scale=0, title="Deformed Structure (auto-scaled)"
+                    )
+                else:
+                    scale = st.slider("Magnification Factor", 1.0, 500.0, 50.0, 1.0, key="def_scale")
+                    fig_def = Visualizer.plot_structure(
+                        struct, u=u, scale=scale, title="Deformed Structure"
+                    )
             st.pyplot(fig_def)
 
             st.write("")
@@ -499,7 +1126,12 @@ with tab_heatmap:
     ne = st.session_state.node_energies
     if ne is not None:
         try:
-            fig_hm = Visualizer.plot_energy_heatmap(struct, ne, title="Strain Energy")
+            _hm_dens = None
+            if _is_simp_result and st.session_state.result is not None:
+                _hm_dens = st.session_state.result.densities
+            fig_hm = Visualizer.plot_energy_heatmap(
+                struct, ne, title="Strain Energy", densities=_hm_dens,
+            )
             st.pyplot(fig_hm)
 
             st.write("")
@@ -518,31 +1150,355 @@ with tab_heatmap:
     else:
         st.info("Run an optimization or a single step first.")
 
-with tab_bw:
-    try:
-        fig_bw = Visualizer.plot_bw_density(
-            struct,
-            initial_structure=st.session_state.initial_structure,
-            title="Topology (Black & White)",
-        )
-        st.pyplot(fig_bw)
+with tab_loadpath:
+    u_lp = st.session_state.displacement
+    if u_lp is not None:
+        try:
+            struct.renumber_dofs()
+            # Pass SIMP densities for density-scaled internal forces
+            _simp_dens = None
+            _simp_pen = 3.0
+            if _is_simp and st.session_state.result is not None:
+                _simp_dens = st.session_state.result.densities
+                _simp_pen = st.session_state.result.penalization
+            spring_forces = FEMSolver.compute_internal_forces(
+                struct, u_lp, densities=_simp_dens, penalization=_simp_pen,
+            )
+            fig_lp = Visualizer.plot_internal_forces(
+                struct,
+                spring_forces,
+                title="Tension & Compression",
+                densities=_simp_dens,
+            )
+            st.pyplot(fig_lp)
 
-        st.write("")
-        png_bw = Visualizer.fig_to_png_bytes(fig_bw)
-        st.download_button(
-            "⬇️ Download Image (PNG)",
-            data=png_bw,
-            file_name="topology_bw.png",
-            mime="image/png",
-            key="dl_bw",
+            st.write("")
+            png_lp = Visualizer.fig_to_png_bytes(fig_lp)
+            st.download_button(
+                "⬇️ Download Image (PNG)",
+                data=png_lp,
+                file_name="load_path.png",
+                mime="image/png",
+                key="dl_lp",
+            )
+            plt.close(fig_lp)
+        except Exception:
+            logger.exception("Failed to render load path plot")
+            st.error("Could not render the load path plot.")
+    else:
+        st.info("Run an optimization or a single step first.")
+
+with tab_bw:
+    if _is_simp and st.session_state.result is not None and st.session_state.result.densities:
+        # For SIMP: render B/W density from the spring density values
+        try:
+            fig_bw = Visualizer.plot_bw_density_from_springs(
+                struct,
+                st.session_state.result.densities,
+                initial_structure=st.session_state.initial_structure,
+                title="Topology (Black & White) - SIMP",
+            )
+            st.pyplot(fig_bw)
+
+            st.write("")
+            png_bw = Visualizer.fig_to_png_bytes(fig_bw)
+            st.download_button(
+                "⬇️ Download Image (PNG)",
+                data=png_bw,
+                file_name="topology_bw.png",
+                mime="image/png",
+                key="dl_bw",
+            )
+            plt.close(fig_bw)
+        except Exception:
+            logger.exception("Failed to render B/W density plot for SIMP")
+            st.error("Could not render the density plot.")
+    else:
+        try:
+            fig_bw = Visualizer.plot_bw_density(
+                struct,
+                initial_structure=st.session_state.initial_structure,
+                title="Topology (Black & White)",
+            )
+            st.pyplot(fig_bw)
+
+            st.write("")
+            png_bw = Visualizer.fig_to_png_bytes(fig_bw)
+            st.download_button(
+                "⬇️ Download Image (PNG)",
+                data=png_bw,
+                file_name="topology_bw.png",
+                mime="image/png",
+                key="dl_bw",
+            )
+            plt.close(fig_bw)
+        except Exception:
+            logger.exception("Failed to render B/W density plot")
+            st.error("Could not render the density plot.")
+
+with tab_density:
+    res_density = st.session_state.result
+    if res_density is not None and res_density.densities is not None:
+        try:
+            fig_dens = Visualizer.plot_density_field(
+                struct, res_density.densities,
+                title="SIMP Density Field",
+            )
+            st.pyplot(fig_dens)
+
+            st.write("")
+            png_dens = Visualizer.fig_to_png_bytes(fig_dens)
+            st.download_button(
+                "⬇️ Download Image (PNG)",
+                data=png_dens,
+                file_name="density_field.png",
+                mime="image/png",
+                key="dl_dens",
+            )
+            plt.close(fig_dens)
+        except Exception:
+            logger.exception("Failed to render density field plot")
+            st.error("Could not render the density field plot.")
+    else:
+        st.info(
+            "Run a **SIMP** optimization to see the continuous density field here."
         )
-        plt.close(fig_bw)
-    except Exception:
-        logger.exception("Failed to render B/W density plot")
-        st.error("Could not render the density plot.")
+
+with tab_compare:
+    comparison_results = st.session_state.comparison_results
+    _n_comp = len(comparison_results)
+
+    if _n_comp == 0:
+        st.info(
+            "No comparison data yet.  \n\n"
+            "**How to compare algorithms:**\n"
+            "- Click the **🔬 Compare Both** button above to "
+            "automatically run both INR and SIMP on the same structure.\n"
+            "- Alternatively, run optimizations individually with each "
+            "algorithm — results accumulate here automatically."
+        )
+    elif _n_comp == 1:
+        _done_algo = list(comparison_results.keys())[0]
+        _missing = "SIMP" if "INR" in _done_algo else "Node Removal (INR)"
+        st.warning(
+            f"**{_done_algo}** result collected. "
+            f"Run **{_missing}** to see the comparison, "
+            f"or click **🔬 Compare Both** to run both automatically."
+        )
+        # Show single result preview
+        _single_res = comparison_results[_done_algo]
+        _c_single = _single_res.compliance_history[-1] if _single_res.compliance_history else 0.0
+        st.metric(f"{_done_algo} — Final Compliance", f"{_c_single:.4g}")
+    else:
+        # Full comparison view
+        st.subheader("Performance Summary")
+
+        # Compute detailed metrics for each algorithm
+        _compliances = {}
+        _iterations = {}
+        _masses = {}
+        _mass_fractions = {}
+        _nodes = {}
+        _springs = {}
+        _compliance_changes = {}
+        _initial_mass = (
+            st.session_state.initial_structure.total_mass()
+            if st.session_state.initial_structure else 1.0
+        )
+        _initial_nodes = (
+            st.session_state.initial_structure.num_nodes
+            if st.session_state.initial_structure else 0
+        )
+        _initial_springs = (
+            st.session_state.initial_structure.graph.number_of_edges()
+            if st.session_state.initial_structure else 0
+        )
+
+        for algo_name, algo_res in comparison_results.items():
+            c_final = algo_res.compliance_history[-1] if algo_res.compliance_history else 0.0
+            c_init = algo_res.compliance_history[0] if algo_res.compliance_history else 0.0
+            _compliances[algo_name] = c_final
+            _iterations[algo_name] = algo_res.iterations
+            _compliance_changes[algo_name] = (
+                ((c_final - c_init) / c_init * 100) if c_init != 0 else 0.0
+            )
+
+            final_struct = algo_res.history[-1] if algo_res.history else None
+            if algo_res.densities is not None and final_struct is not None:
+                # SIMP: density-weighted metrics
+                _dens = algo_res.densities
+                _threshold = 0.1
+                _sp_list = final_struct.get_springs()
+                eff_mass = sum(
+                    _dens.get(sp.node_ids, _dens.get((sp.node_ids[1], sp.node_ids[0]), 1.0)) * sp.length
+                    for sp in _sp_list
+                )
+                tot_mass = sum(sp.length for sp in _sp_list)
+                active_spr = sum(1 for d in _dens.values() if d >= _threshold)
+                active_nd = set()
+                for sp in _sp_list:
+                    key = sp.node_ids
+                    rkey = (key[1], key[0])
+                    xe = _dens.get(key, _dens.get(rkey, 1.0))
+                    if xe >= _threshold:
+                        active_nd.add(key[0])
+                        active_nd.add(key[1])
+                _masses[algo_name] = eff_mass
+                _mass_fractions[algo_name] = eff_mass / _initial_mass if _initial_mass > 0 else 0
+                _nodes[algo_name] = len(active_nd)
+                _springs[algo_name] = active_spr
+            elif final_struct is not None:
+                # Node Removal (INR)
+                _masses[algo_name] = final_struct.total_mass()
+                _mass_fractions[algo_name] = (
+                    final_struct.total_mass() / _initial_mass if _initial_mass > 0 else 0
+                )
+                _nodes[algo_name] = final_struct.num_nodes
+                _springs[algo_name] = final_struct.graph.number_of_edges()
+            else:
+                _masses[algo_name] = 0
+                _mass_fractions[algo_name] = 0
+                _nodes[algo_name] = 0
+                _springs[algo_name] = 0
+
+        # Metrics cards
+        comp_cols = st.columns(len(comparison_results))
+        for col, algo_name in zip(comp_cols, comparison_results):
+            with col:
+                st.markdown(f"**{algo_name}**")
+                m1, m2 = st.columns(2)
+                m1.metric("Iterations", _iterations[algo_name])
+                m2.metric("Final Compliance", f"{_compliances[algo_name]:.4g}")
+                m3, m4 = st.columns(2)
+                m3.metric("Nodes", _nodes[algo_name],
+                          delta=f"{_nodes[algo_name] - _initial_nodes}" if _initial_nodes else None,
+                          delta_color="off")
+                m4.metric("Springs", _springs[algo_name],
+                          delta=f"{_springs[algo_name] - _initial_springs}" if _initial_springs else None,
+                          delta_color="off")
+                m5, m6 = st.columns(2)
+                m5.metric("Mass", f"{_masses[algo_name]:.0f}")
+                m6.metric("Mass Fraction", f"{_mass_fractions[algo_name]:.1%}")
+                st.metric("Compliance Change", f"{_compliance_changes[algo_name]:+.1f}%")
+
+        # Determine winner
+        if len(_compliances) == 2:
+            names = list(_compliances.keys())
+            c0, c1 = _compliances[names[0]], _compliances[names[1]]
+            if c0 > 0 and c1 > 0:
+                if c0 < c1:
+                    diff_pct = (c1 - c0) / c1 * 100
+                    st.success(
+                        f"**{names[0]}** achieved {diff_pct:.1f}% lower compliance "
+                        f"(stiffer result) than **{names[1]}**."
+                    )
+                elif c1 < c0:
+                    diff_pct = (c0 - c1) / c0 * 100
+                    st.success(
+                        f"**{names[1]}** achieved {diff_pct:.1f}% lower compliance "
+                        f"(stiffer result) than **{names[0]}**."
+                    )
+                else:
+                    st.info("Both algorithms achieved the same compliance.")
+
+        # Side-by-side structure plots
+        st.subheader("Structure Comparison")
+        try:
+            fig_struct_comp = Visualizer.plot_comparison_structures(
+                comparison_results,
+            )
+            st.pyplot(fig_struct_comp)
+
+            png_struct_comp = Visualizer.fig_to_png_bytes(fig_struct_comp)
+            st.download_button(
+                "⬇️ Download Structure Comparison (PNG)",
+                data=png_struct_comp,
+                file_name="structure_comparison.png",
+                mime="image/png",
+                key="dl_struct_comp",
+            )
+            plt.close(fig_struct_comp)
+        except Exception:
+            logger.exception("Failed to render structure comparison plot")
+            st.error("Could not render the structure comparison plot.")
+
+        # Compliance convergence overlay
+        st.subheader("Compliance Convergence")
+        try:
+            fig_cc = Visualizer.plot_compliance_comparison(comparison_results)
+            st.pyplot(fig_cc)
+
+            png_cc = Visualizer.fig_to_png_bytes(fig_cc)
+            st.download_button(
+                "⬇️ Download Compliance Comparison (PNG)",
+                data=png_cc,
+                file_name="compliance_comparison.png",
+                mime="image/png",
+                key="dl_cc",
+            )
+            plt.close(fig_cc)
+        except Exception:
+            logger.exception("Failed to render compliance comparison chart")
+            st.error("Could not render the compliance comparison chart.")
+
+# Animation export (if full optimisation was run)
+result: OptimizationResult | None = st.session_state.result
+_has_inr_animation = result is not None and len(result.history) > 1
+_has_simp_animation = result is not None and len(result.density_history) > 1
+if _has_inr_animation or _has_simp_animation:
+    st.divider()
+    st.subheader("🎬 Optimization Animation")
+
+    anim_cols = st.columns([1, 1, 2])
+    with anim_cols[0]:
+        anim_mode = st.selectbox(
+            "Style",
+            ["B/W Density", "Structure"],
+            key="anim_mode",
+        )
+    with anim_cols[1]:
+        anim_speed = st.slider(
+            "Frame Duration (ms)", 100, 1000, 300, 50,
+            key="anim_speed",
+        )
+
+    mode_key = "bw" if anim_mode == "B/W Density" else "structure"
+
+    if st.button("🎞️ Generate Animation (GIF)", width='content', key="gen_anim"):
+        try:
+            with st.spinner("Rendering animation frames..."):
+                if _has_simp_animation:
+                    gif_bytes = Visualizer.create_simp_animation_gif(
+                        st.session_state.structure,
+                        result.density_history,
+                        initial_structure=st.session_state.initial_structure,
+                        mode=mode_key,
+                        duration_ms=anim_speed,
+                    )
+                else:
+                    gif_bytes = Visualizer.create_animation_gif(
+                        result.history,
+                        initial_structure=st.session_state.initial_structure,
+                        mode=mode_key,
+                        duration_ms=anim_speed,
+                    )
+            st.session_state["animation_gif"] = gif_bytes
+            st.session_state["animation_mode"] = mode_key
+        except Exception:
+            logger.exception("Failed to create animation GIF")
+            st.error("Could not create the animation. Check logs for details.")
+
+    if "animation_gif" in st.session_state and st.session_state["animation_gif"] is not None:
+        st.image(st.session_state["animation_gif"], caption="Optimization Animation", width='stretch')
+        st.download_button(
+            "⬇️ Download Animation (GIF)",
+            data=st.session_state["animation_gif"],
+            file_name="optimization_animation.gif",
+            mime="image/gif",
+            key="dl_anim",
+        )
 
 # Compliance history chart (if full optimisation was run)
-result: OptimizationResult | None = st.session_state.result
 if result is not None and result.compliance_history:
     st.divider()
     st.subheader("📈 Compliance History")
@@ -605,3 +1561,74 @@ if result is not None and result.compliance_history:
     except Exception:
         logger.exception("Failed to render compliance history chart")
         st.error("Could not render the compliance history chart.")
+
+# Final report
+st.divider()
+st.subheader("📄 Final Report")
+st.caption(
+    "Generate a self-contained HTML report with all plots, "
+    "metrics, and parameters bundled into a single downloadable file."
+)
+
+_can_report = (
+    st.session_state.structure is not None
+    and (
+        st.session_state.result is not None
+        or st.session_state.displacement is not None
+    )
+)
+
+if _can_report:
+    if st.button("📄 Generate Report", key="gen_report", use_container_width=True):
+        try:
+            with st.spinner("Building report ..."):
+                # Collect current sidebar parameters
+                _algo = st.session_state.algorithm
+                _params: dict = {
+                    "target_mass_fraction": target_frac,
+                    "filter_radius": filter_radius,
+                }
+                if _algo == "SIMP":
+                    _params["penalization"] = simp_penalization
+                    _params["move_limit"] = simp_move_limit
+                    _params["convergence_tol"] = simp_convergence_tol
+                    _params["max_iterations"] = simp_max_iterations
+                else:
+                    _params["removal_per_iteration"] = removal_rate
+
+                html_report = generate_report(
+                    initial_structure=st.session_state.initial_structure,
+                    final_structure=st.session_state.structure,
+                    result=st.session_state.result,
+                    displacement=st.session_state.displacement,
+                    node_energies=st.session_state.node_energies,
+                    algorithm=_algo,
+                    parameters=_params,
+                    comparison_results=(
+                        st.session_state.comparison_results
+                        if st.session_state.comparison_results
+                        else None
+                    ),
+                    version=__version__,
+                )
+                st.session_state["report_html"] = html_report
+                logger.info("Final report generated successfully")
+        except Exception:
+            logger.exception("Failed to generate final report")
+            st.error("Could not generate the report. Check logs for details.")
+
+    if "report_html" in st.session_state and st.session_state["report_html"]:
+        st.download_button(
+            "⬇️ Download Report (HTML)",
+            data=st.session_state["report_html"],
+            file_name="topology_optimization_report.html",
+            mime="text/html",
+            key="dl_report",
+            use_container_width=True,
+        )
+        st.success("Report ready! Click above to download.")
+else:
+    st.info(
+        "Run an optimisation first, then come back here to generate "
+        "a comprehensive final report."
+    )

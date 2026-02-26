@@ -143,3 +143,49 @@ class TestSolve:
         u = solver.solve(rect_3x2)
         assert len(u) == rect_3x2.num_dofs
         assert not np.any(np.isnan(u))
+
+
+class TestComputeInternalForces:
+    """FEMSolver.compute_internal_forces"""
+
+    @pytest.fixture
+    def solved_cantilever(self):
+        struct = Structure.create_rectangular(4, 2)
+        cols, rows = 5, 3
+        for iz in range(rows):
+            n = struct.get_node(iz * cols)
+            n.fixed_x = n.fixed_z = True
+        struct.get_node(cols - 1).fz = 1.0
+        struct.renumber_dofs()
+        u = FEMSolver().solve(struct)
+        return struct, u
+
+    def test_returns_dict_for_all_springs(self, solved_cantilever):
+        struct, u = solved_cantilever
+        forces = FEMSolver.compute_internal_forces(struct, u)
+        assert len(forces) == len(struct.get_springs())
+
+    def test_keys_are_node_id_tuples(self, solved_cantilever):
+        struct, u = solved_cantilever
+        forces = FEMSolver.compute_internal_forces(struct, u)
+        for key in forces:
+            assert isinstance(key, tuple) and len(key) == 2
+
+    def test_force_info_has_expected_keys(self, solved_cantilever):
+        struct, u = solved_cantilever
+        forces = FEMSolver.compute_internal_forces(struct, u)
+        expected = {"axial_force", "abs_force", "force_vec", "node_i", "node_j", "angle"}
+        for info in forces.values():
+            assert expected.issubset(info.keys())
+
+    def test_abs_force_is_non_negative(self, solved_cantilever):
+        struct, u = solved_cantilever
+        forces = FEMSolver.compute_internal_forces(struct, u)
+        for info in forces.values():
+            assert info["abs_force"] >= 0.0
+
+    def test_nonzero_forces_exist(self, solved_cantilever):
+        struct, u = solved_cantilever
+        forces = FEMSolver.compute_internal_forces(struct, u)
+        max_f = max(info["abs_force"] for info in forces.values())
+        assert max_f > 1e-10

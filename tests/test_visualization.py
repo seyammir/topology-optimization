@@ -111,3 +111,118 @@ class TestExportHelpers:
         assert os.path.exists(path)
         assert os.path.getsize(path) > 0
         plt.close(fig)
+
+
+class TestAnimationGif:
+    """Test animated GIF creation."""
+
+    def test_create_animation_gif_bw(self, small_struct):
+        """GIF bytes are produced in B/W mode."""
+        history = [small_struct.snapshot(), small_struct.snapshot()]
+        gif = Visualizer.create_animation_gif(
+            history,
+            initial_structure=small_struct,
+            mode="bw",
+            duration_ms=100,
+        )
+        assert isinstance(gif, bytes)
+        assert len(gif) > 0
+        # GIF magic bytes
+        assert gif[:4] == b"GIF8"
+
+    def test_create_animation_gif_structure(self, small_struct):
+        """GIF bytes are produced in structure mode."""
+        history = [small_struct.snapshot()]
+        gif = Visualizer.create_animation_gif(
+            history, mode="structure", duration_ms=100,
+        )
+        assert isinstance(gif, bytes)
+        assert gif[:4] == b"GIF8"
+
+    def test_empty_history_raises(self):
+        with pytest.raises(ValueError, match="at least one"):
+            Visualizer.create_animation_gif([])
+
+
+class TestSimpAnimationGif:
+    """Test SIMP-specific animated GIF creation."""
+
+    @pytest.fixture
+    def simp_density_data(self, small_struct):
+        """Return (structure, density_history) with 3 fake snapshots."""
+        springs = small_struct.get_springs()
+        # Simulate density evolution: start at 1.0, then gradually change
+        snap1 = {sp.node_ids: 1.0 for sp in springs}
+        snap2 = {sp.node_ids: 0.7 for sp in springs}
+        snap3 = {sp.node_ids: 0.4 for sp in springs}
+        return small_struct, [snap1, snap2, snap3]
+
+    def test_create_simp_animation_bw(self, simp_density_data):
+        """GIF bytes are produced in B/W mode for SIMP."""
+        struct, density_history = simp_density_data
+        gif = Visualizer.create_simp_animation_gif(
+            struct,
+            density_history,
+            initial_structure=struct,
+            mode="bw",
+            duration_ms=100,
+        )
+        assert isinstance(gif, bytes)
+        assert len(gif) > 0
+        assert gif[:4] == b"GIF8"
+
+    def test_create_simp_animation_structure(self, simp_density_data):
+        """GIF bytes are produced in structure mode for SIMP."""
+        struct, density_history = simp_density_data
+        gif = Visualizer.create_simp_animation_gif(
+            struct,
+            density_history,
+            mode="structure",
+            duration_ms=100,
+        )
+        assert isinstance(gif, bytes)
+        assert gif[:4] == b"GIF8"
+
+    def test_empty_density_history_raises(self, small_struct):
+        with pytest.raises(ValueError, match="at least one"):
+            Visualizer.create_simp_animation_gif(small_struct, [])
+
+    def test_single_frame(self, small_struct):
+        """A single density snapshot still produces a valid GIF."""
+        springs = small_struct.get_springs()
+        snap = {sp.node_ids: 0.5 for sp in springs}
+        gif = Visualizer.create_simp_animation_gif(
+            small_struct, [snap], mode="bw", duration_ms=100,
+        )
+        assert isinstance(gif, bytes)
+        assert gif[:4] == b"GIF8"
+
+
+class TestPlotLoadPaths:
+    """Visualizer.plot_internal_forces"""
+
+    @pytest.fixture
+    def solved(self, small_struct):
+        small_struct.renumber_dofs()
+        u = FEMSolver().solve(small_struct)
+        forces = FEMSolver.compute_internal_forces(small_struct, u)
+        return small_struct, forces
+
+    def test_returns_figure(self, solved):
+        struct, forces = solved
+        fig = Visualizer.plot_internal_forces(struct, forces)
+        assert isinstance(fig, Figure)
+        plt.close(fig)
+
+    def test_custom_title(self, solved):
+        struct, forces = solved
+        fig = Visualizer.plot_internal_forces(struct, forces, title="Custom")
+        assert isinstance(fig, Figure)
+        plt.close(fig)
+
+    def test_exportable_to_png(self, solved):
+        struct, forces = solved
+        fig = Visualizer.plot_internal_forces(struct, forces)
+        png = Visualizer.fig_to_png_bytes(fig)
+        assert len(png) > 100
+        plt.close(fig)

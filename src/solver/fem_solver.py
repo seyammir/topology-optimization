@@ -62,11 +62,123 @@ class FEMSolver:
         # Replace any NaN / Inf with 0 (safety net for near-singular K).
         if np.any(np.isnan(u)) or np.any(np.isinf(u)):
             logger.warning(
-                "Solver produced NaN/Inf displacements — replacing with 0. "
+                "Solver produced NaN/Inf displacements - replacing with 0. "
                 "The stiffness matrix may be (near-)singular."
             )
         u = np.nan_to_num(u, nan=0.0, posinf=0.0, neginf=0.0)
         return u
+
+    def solve_with_densities(
+        self,
+        structure: Structure,
+        densities: dict[tuple[int, int], float],
+        penalization: float = 3.0,
+    ) -> np.ndarray:
+        """Assemble and solve with SIMP-style density-penalised stiffnesses.
+
+        Each spring's local stiffness matrix is scaled by
+        ``x_e ** penalization`` before assembly, where ``x_e`` is the
+        spring's design density from *densities*.
+
+        Parameters
+        ----------
+        structure : Structure
+            The full design-domain structure (all springs present).
+        densities : dict[(node_i_id, node_j_id), float]
+            Per-spring density values in [x_min, 1].
+        penalization : float
+            SIMP penalization exponent *p* (typically 3).
+
+        Returns
+        -------
+        u : ndarray, shape (num_dofs,)
+        """
+        structure.renumber_dofs()
+        n_dof = structure.num_dofs
+        K = self._assemble_global_stiffness_density(
+            structure, densities, penalization,
+        )
+        F = self._build_force_vector(structure)
+        K, F = self._apply_boundary_conditions(K, F, structure)
+        K = K.tocsr() + self.REGULARISATION * sparse.eye(n_dof, format="csr")
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", sparse.SparseEfficiencyWarning)
+            warnings.filterwarnings("ignore", message=".*singular.*")
+            u = spsolve(K.tocsc(), F)
+
+        if np.any(np.isnan(u)) or np.any(np.isinf(u)):
+            logger.warning(
+                "Solver produced NaN/Inf displacements - replacing with 0."
+            )
+        u = np.nan_to_num(u, nan=0.0, posinf=0.0, neginf=0.0)
+        return u
+
+    # Load-path analysis
+    @staticmethod
+    def compute_internal_forces(
+        structure: Structure,
+        u: np.ndarray,
+        densities: dict[tuple[int, int], float] | None = None,
+        penalization: float = 3.0,
+    ) -> dict[tuple[int, int], dict]:
+        """Compute the internal (axial) force in every spring.
+
+        Parameters
+        ----------
+        structure : Structure
+            The solved structure (DOFs must be numbered).
+        u : ndarray, shape (num_dofs,)
+            Global displacement vector from :meth:`solve`.
+        densities : dict, optional
+            Per-spring SIMP density values.  When provided, each
+            spring's stiffness is scaled by ``x_e ** penalization``.
+        penalization : float
+            SIMP penalization exponent (only used when *densities* is
+            given).
+
+        Returns
+        -------
+        dict[(node_i_id, node_j_id), info]
+            For each spring a dict with keys:
+
+            * ``"axial_force"`` - signed scalar (positive = tension,
+              negative = compression).
+            * ``"abs_force"`` - absolute value.
+            * ``"force_vec"`` - (fx, fz) global force vector acting on
+              node_j (reaction to the spring elongation).
+            * ``"node_i"`` / ``"node_j"`` - endpoint coordinates.
+            * ``"angle"`` - spring angle [rad].
+        """
+        import math
+        results: dict[tuple[int, int], dict] = {}
+        for spring in structure.get_springs():
+            dofs = spring.dof_indices  # [ix, iz, jx, jz]
+            u_e = u[dofs]
+            c = math.cos(spring.angle)
+            s = math.sin(spring.angle)
+            # Axial elongation: δ = c*(ux_j-ux_i) + s*(uz_j-uz_i)
+            delta = c * (u_e[2] - u_e[0]) + s * (u_e[3] - u_e[1])
+
+            # Effective stiffness: scale by density if SIMP
+            k_eff = spring.k
+            if densities is not None:
+                ni, nj = spring.node_ids
+                key = (ni, nj) if (ni, nj) in densities else (nj, ni)
+                xe = densities.get(key, 1.0)
+                k_eff = xe ** penalization * spring.k
+
+            axial = k_eff * delta  # positive = tension
+            ni, nj = spring.node_ids
+            results[(ni, nj)] = {
+                "axial_force": axial,
+                "abs_force": abs(axial),
+                "force_vec": (axial * c, axial * s),
+                "node_i": (spring.node_i.x, spring.node_i.z),
+                "node_j": (spring.node_j.x, spring.node_j.z),
+                "angle": spring.angle,
+            }
+        return results
 
     # Assembly
     @staticmethod
@@ -78,6 +190,31 @@ class FEMSolver:
         for spring in structure.get_springs():
             ke = spring.local_stiffness_matrix()  # 4x4
             dofs = spring.dof_indices               # [ix, iz, jx, jz]
+            for r in range(4):
+                for c in range(4):
+                    K[dofs[r], dofs[c]] += ke[r, c]
+        return K
+
+    @staticmethod
+    def _assemble_global_stiffness_density(
+        structure: Structure,
+        densities: dict[tuple[int, int], float],
+        penalization: float,
+    ) -> sparse.lil_matrix:
+        """Build a density-penalised global stiffness matrix.
+
+        Each spring's contribution is scaled by ``x_e^p``.
+        """
+        n_dof = structure.num_dofs
+        K = sparse.lil_matrix((n_dof, n_dof), dtype=float)
+
+        for spring in structure.get_springs():
+            ni, nj = spring.node_ids
+            key = (ni, nj) if (ni, nj) in densities else (nj, ni)
+            xe = densities.get(key, 1.0)
+            scale = xe ** penalization
+            ke = spring.local_stiffness_matrix() * scale
+            dofs = spring.dof_indices
             for r in range(4):
                 for c in range(4):
                     K[dofs[r], dofs[c]] += ke[r, c]
