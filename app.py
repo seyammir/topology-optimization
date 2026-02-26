@@ -132,6 +132,33 @@ def _reset_state() -> None:
     st.session_state.optimization_running = False
 
 
+def _has_valid_boundary_conditions(struct: Structure) -> bool:
+    """Return True if the structure has at least one support AND one load."""
+    nodes = struct.get_nodes()
+    if not nodes:
+        return False
+    return (
+        any(n.is_fixed for n in nodes)
+        and any(n.has_load for n in nodes)
+    )
+
+
+def _sync_boundary_conditions(source: Structure, target: Structure) -> None:
+    """Copy boundary conditions & forces from *source* nodes to *target* nodes.
+
+    Nodes are matched by their (x, z) grid position so that the full
+    initial topology can be restored while keeping user-defined BCs.
+    """
+    src_map = {(n.x, n.z): n for n in source.get_nodes()}
+    for node in target.get_nodes():
+        src_node = src_map.get((node.x, node.z))
+        if src_node is not None:
+            node.fixed_x = src_node.fixed_x
+            node.fixed_z = src_node.fixed_z
+            node.fx = src_node.fx
+            node.fz = src_node.fz
+
+
 # SIDEBAR
 with st.sidebar:
     st.header("⚙️ Configuration")
@@ -442,6 +469,92 @@ with st.expander("🔧 Edit Boundary Conditions & Forces", expanded=False):
     else:
         st.warning("No node found at this position.")
 
+    # Quick-apply default boundary conditions
+    st.divider()
+    st.markdown("**Quick Setup** - apply standard boundary conditions automatically:")
+
+    bc_preset = st.selectbox(
+        "BC Preset",
+        ["MBB Beam (full)", "MBB Beam (half symmetry)"],
+        key=f"bc_preset_{_g}",
+        help=(
+            "**Full MBB**: Pin bottom-left, roller bottom-right, load at top-centre.\n\n"
+            "**Half MBB**: Left edge fixed in x (symmetry rollers), "
+            "roller bottom-right, load at top-left corner."
+        ),
+    )
+
+    if st.button("⚡ Apply Default Boundary Conditions", key=f"auto_bc_{_g}"):
+        _all = struct.get_nodes()
+        if _all:
+            # Clear existing BCs first
+            for n in _all:
+                n.fixed_x = False
+                n.fixed_z = False
+                n.fx = 0.0
+                n.fz = 0.0
+
+            min_x = min(n.x for n in _all)
+            max_x = max(n.x for n in _all)
+            max_z = max(n.z for n in _all)  # bottom (z points down)
+            min_z = min(n.z for n in _all)  # top
+
+            if bc_preset == "MBB Beam (half symmetry)":
+                # Left edge: all nodes fixed in x (symmetry rollers)
+                for n in _all:
+                    if n.x == min_x:
+                        n.fixed_x = True
+                # Roller bottom-right
+                br = min((n for n in _all if n.x == max_x and n.z == max_z),
+                         key=lambda n: n.id, default=None)
+                if br:
+                    br.fixed_z = True
+                # Force at top-left corner
+                tl = min((n for n in _all if n.x == min_x and n.z == min_z),
+                         key=lambda n: n.id, default=None)
+                if tl:
+                    tl.fz = 1.0
+                logger.info("Applied half-MBB boundary conditions")
+            else:
+                # Full MBB beam
+                # Pin bottom-left
+                bl = min((n for n in _all if n.x == min_x and n.z == max_z),
+                         key=lambda n: n.id, default=None)
+                if bl:
+                    bl.fixed_x = True
+                    bl.fixed_z = True
+                # Roller bottom-right
+                br = min((n for n in _all if n.x == max_x and n.z == max_z),
+                         key=lambda n: n.id, default=None)
+                if br:
+                    br.fixed_z = True
+                # Force at top-centre
+                mid_x = (min_x + max_x) / 2.0
+                top_nodes = [n for n in _all if n.z == min_z]
+                if top_nodes:
+                    centre = min(top_nodes, key=lambda n: abs(n.x - mid_x))
+                    centre.fz = 1.0
+                logger.info("Applied full-MBB boundary conditions")
+
+            st.session_state.initial_structure = struct.snapshot()
+            st.session_state.editor_gen += 1
+            logger.info("Applied default MBB boundary conditions")
+            st.rerun()
+
+# Show a warning if boundary conditions are missing
+if not _has_valid_boundary_conditions(struct):
+    _nodes = struct.get_nodes()
+    _missing = []
+    if not any(n.is_fixed for n in _nodes):
+        _missing.append("**supports** (Fixed x / Fixed z)")
+    if not any(n.has_load for n in _nodes):
+        _missing.append("**forces** (Fx or Fz)")
+    st.warning(
+        "⚠️ Missing boundary conditions: " + " and ".join(_missing) + ". "
+        "Open **🔧 Edit Boundary Conditions & Forces** above to set them "
+        "before running the optimization."
+    )
+
 # Summary metrics
 st.divider()
 col_m1, col_m2, col_m3, col_m4 = st.columns(4)
@@ -569,144 +682,164 @@ def _create_optimizer():
             filter_radius=filter_radius,
         )
 
+# Validate boundary conditions before any optimisation action
+_bc_ok = _has_valid_boundary_conditions(struct)
+_bc_msg = (
+    "The structure has no boundary conditions set. "
+    "Please open **🔧 Edit Boundary Conditions & Forces** above "
+    "and assign at least one **support** (Fixed x / Fixed z) "
+    "and one **force** (Fx or Fz) before running the optimization."
+)
+
 # Full optimisation run
 if run_full:
-    try:
-        # Always reset to initial structure so that repeated /
-        # comparative runs are independent of each other.
-        algo = st.session_state.algorithm
-        if st.session_state.initial_structure is not None:
-            struct = st.session_state.initial_structure.snapshot()
-            st.session_state.structure = struct
+    if not _bc_ok:
+        st.error(_bc_msg)
+    else:
+        try:
+            # Always reset to initial structure so that repeated /
+            # comparative runs are independent of each other.
+            algo = st.session_state.algorithm
+            if st.session_state.initial_structure is not None:
+                # Preserve user-defined BCs on the full initial topology
+                _sync_boundary_conditions(st.session_state.structure,
+                                          st.session_state.initial_structure)
+                struct = st.session_state.initial_structure.snapshot()
+                st.session_state.structure = struct
 
-        st.session_state.optimization_running = True
-        optimizer = _create_optimizer()
-        progress_bar = st.progress(0.0)
-        status_text = st.empty()
-        initial_mass = struct.total_mass()
-        target_mass = target_frac * initial_mass
+            st.session_state.optimization_running = True
+            optimizer = _create_optimizer()
+            progress_bar = st.progress(0.0)
+            status_text = st.empty()
+            initial_mass = struct.total_mass()
+            target_mass = target_frac * initial_mass
 
-        def _cb(s: Structure, it: int, ne: dict[int, float]) -> None:
-            if algo == "SIMP":
-                max_it = optimizer.max_iterations
-                frac_done = min(1.0, it / max_it)
-                progress_bar.progress(frac_done)
-                # Compute current volume fraction from densities
-                dens = getattr(s, "_simp_densities", None)
-                vols = getattr(s, "_simp_spring_volumes", None)
-                if dens and vols:
-                    cur_vol = sum(dens[k] * vols[k] for k in dens)
-                    tot_vol = sum(vols.values())
-                    active = sum(1 for d in dens.values() if d >= 0.1)
-                    status_text.text(
-                        f"[SIMP] Iteration {it}/{max_it} - "
-                        f"Active Springs: {active}, "
-                        f"Mass: {cur_vol:.0f}/{target_mass:.0f}"
-                    )
+            def _cb(s: Structure, it: int, ne: dict[int, float]) -> None:
+                if algo == "SIMP":
+                    max_it = optimizer.max_iterations
+                    frac_done = min(1.0, it / max_it)
+                    progress_bar.progress(frac_done)
+                    # Compute current volume fraction from densities
+                    dens = getattr(s, "_simp_densities", None)
+                    vols = getattr(s, "_simp_spring_volumes", None)
+                    if dens and vols:
+                        cur_vol = sum(dens[k] * vols[k] for k in dens)
+                        tot_vol = sum(vols.values())
+                        active = sum(1 for d in dens.values() if d >= 0.1)
+                        status_text.text(
+                            f"[SIMP] Iteration {it}/{max_it} - "
+                            f"Active Springs: {active}, "
+                            f"Mass: {cur_vol:.0f}/{target_mass:.0f}"
+                        )
+                    else:
+                        status_text.text(f"[SIMP] Iteration {it}/{max_it}")
                 else:
-                    status_text.text(f"[SIMP] Iteration {it}/{max_it}")
-            else:
-                frac_done = 1.0 - (s.total_mass() - target_mass) / (initial_mass - target_mass)
-                frac_done = max(0.0, min(1.0, frac_done))
-                progress_bar.progress(frac_done)
+                    frac_done = 1.0 - (s.total_mass() - target_mass) / (initial_mass - target_mass)
+                    frac_done = max(0.0, min(1.0, frac_done))
+                    progress_bar.progress(frac_done)
+                    status_text.text(
+                        f"[{algo}] Iteration {it} - "
+                        f"Nodes: {s.num_nodes}, "
+                        f"Mass: {s.total_mass():.0f}/{target_mass:.0f}"
+                    )
+
+            logger.info(
+                "Starting optimization: algo=%s, target=%.0f%%, filter=%.1f",
+                algo, target_frac * 100, filter_radius,
+            )
+            result = optimizer.optimize(struct, callback=_cb)
+            progress_bar.progress(1.0)
+            if algo == "SIMP" and result.densities:
+                _active_final = sum(1 for d in result.densities.values() if d >= 0.1)
+                _c_final = result.compliance_history[-1] if result.compliance_history else 0
                 status_text.text(
-                    f"[{algo}] Iteration {it} - "
-                    f"Nodes: {s.num_nodes}, "
-                    f"Mass: {s.total_mass():.0f}/{target_mass:.0f}"
+                    f"Done! [SIMP] after {result.iterations} iterations - "
+                    f"Active Springs: {_active_final}/{len(result.densities)}, "
+                    f"Compliance: {_c_final:.4g}"
                 )
+            else:
+                status_text.text(
+                    f"Done! [{algo}] after {result.iterations} iterations - "
+                    f"{struct.num_nodes} nodes remaining."
+                )
+            st.session_state.result = result
 
-        logger.info(
-            "Starting optimization: algo=%s, target=%.0f%%, filter=%.1f",
-            algo, target_frac * 100, filter_radius,
-        )
-        result = optimizer.optimize(struct, callback=_cb)
-        progress_bar.progress(1.0)
-        if algo == "SIMP" and result.densities:
-            _active_final = sum(1 for d in result.densities.values() if d >= 0.1)
-            _c_final = result.compliance_history[-1] if result.compliance_history else 0
-            status_text.text(
-                f"Done! [SIMP] after {result.iterations} iterations - "
-                f"Active Springs: {_active_final}/{len(result.densities)}, "
-                f"Compliance: {_c_final:.4g}"
+            # Store in comparison dict
+            st.session_state.comparison_results[algo] = result
+
+            # Solve once more for final displacement.
+            struct.renumber_dofs()
+            solver = FEMSolver()
+            if algo == "SIMP" and result.densities:
+                u = solver.solve_with_densities(struct, result.densities)
+            else:
+                u = solver.solve(struct)
+            st.session_state.displacement = u
+
+            # Final node energies.
+            if algo == "SIMP" and result.densities:
+                st.session_state.node_energies = SIMPOptimizer._compute_node_energies_from_densities(
+                    struct, u, result.densities,
+                )
+            else:
+                st.session_state.node_energies = TopologyOptimizer._compute_node_energies(struct, u)
+            st.session_state.optimization_running = False
+            logger.info(
+                "Optimization complete: algo=%s, %d iterations, %d nodes remaining",
+                algo, result.iterations, struct.num_nodes,
             )
-        else:
-            status_text.text(
-                f"Done! [{algo}] after {result.iterations} iterations - "
-                f"{struct.num_nodes} nodes remaining."
+        except ValueError as exc:
+            st.session_state.optimization_running = False
+            logger.exception("Invalid optimization parameters")
+            st.error(f"Invalid optimization parameters: {exc}")
+        except Exception:
+            st.session_state.optimization_running = False
+            logger.exception("Optimization failed")
+            st.error(
+                "An unexpected error occurred during optimization. "
+                "Please check the structure setup and try again."
             )
-        st.session_state.result = result
-
-        # Store in comparison dict
-        st.session_state.comparison_results[algo] = result
-
-        # Solve once more for final displacement.
-        struct.renumber_dofs()
-        solver = FEMSolver()
-        if algo == "SIMP" and result.densities:
-            u = solver.solve_with_densities(struct, result.densities)
-        else:
-            u = solver.solve(struct)
-        st.session_state.displacement = u
-
-        # Final node energies.
-        if algo == "SIMP" and result.densities:
-            st.session_state.node_energies = SIMPOptimizer._compute_node_energies_from_densities(
-                struct, u, result.densities,
-            )
-        else:
-            st.session_state.node_energies = TopologyOptimizer._compute_node_energies(struct, u)
-        st.session_state.optimization_running = False
-        logger.info(
-            "Optimization complete: algo=%s, %d iterations, %d nodes remaining",
-            algo, result.iterations, struct.num_nodes,
-        )
-    except ValueError as exc:
-        st.session_state.optimization_running = False
-        logger.exception("Invalid optimization parameters")
-        st.error(f"Invalid optimization parameters: {exc}")
-    except Exception:
-        st.session_state.optimization_running = False
-        logger.exception("Optimization failed")
-        st.error(
-            "An unexpected error occurred during optimization. "
-            "Please check the structure setup and try again."
-        )
-    st.rerun()
+        st.rerun()
 
 # Single step
 if run_step:
-    try:
-        optimizer = _create_optimizer()
-        u, ne, removed = optimizer.step(struct)
-        st.session_state.displacement = u
-        st.session_state.node_energies = ne
-        st.session_state.iteration += 1
-        algo = st.session_state.algorithm
-        if removed == 0 and algo != "SIMP":
-            st.warning("No element could be removed - the structure may already be at its minimum.")
-        elif algo == "SIMP":
-            dens = getattr(struct, "_simp_densities", {})
-            active = sum(1 for d in dens.values() if d >= 0.1)
-            st.success(
-                f"[SIMP] Step {st.session_state.iteration}: "
-                f"Active Springs: {active}/{len(dens)}"
-            )
-            logger.info("[SIMP] Single step %d: active springs %d/%d",
-                        st.session_state.iteration, active, len(dens))
-        else:
-            st.success(f"[{algo}] Step {st.session_state.iteration}: {removed} elements removed.")
-            logger.info("[%s] Single step %d: removed %d elements", algo, st.session_state.iteration, removed)
-    except ValueError as exc:
-        logger.exception("Invalid parameters for single step")
-        st.error(f"Invalid parameters: {exc}")
-    except Exception:
-        logger.exception("Single-step optimization failed")
-        st.error("An error occurred during the optimization step.")
-    st.rerun()
+    if not _bc_ok:
+        st.error(_bc_msg)
+    else:
+        try:
+            optimizer = _create_optimizer()
+            u, ne, removed = optimizer.step(struct)
+            st.session_state.displacement = u
+            st.session_state.node_energies = ne
+            st.session_state.iteration += 1
+            algo = st.session_state.algorithm
+            if removed == 0 and algo != "SIMP":
+                st.warning("No element could be removed - the structure may already be at its minimum.")
+            elif algo == "SIMP":
+                dens = getattr(struct, "_simp_densities", {})
+                active = sum(1 for d in dens.values() if d >= 0.1)
+                st.success(
+                    f"[SIMP] Step {st.session_state.iteration}: "
+                    f"Active Springs: {active}/{len(dens)}"
+                )
+                logger.info("[SIMP] Single step %d: active springs %d/%d",
+                            st.session_state.iteration, active, len(dens))
+            else:
+                st.success(f"[{algo}] Step {st.session_state.iteration}: {removed} elements removed.")
+                logger.info("[%s] Single step %d: removed %d elements", algo, st.session_state.iteration, removed)
+        except ValueError as exc:
+            logger.exception("Invalid parameters for single step")
+            st.error(f"Invalid parameters: {exc}")
+        except Exception:
+            logger.exception("Single-step optimization failed")
+            st.error("An error occurred during the optimization step.")
+        st.rerun()
 
 # Compare Both algorithms
 if run_compare:
-    if st.session_state.initial_structure is None:
+    if not _bc_ok:
+        st.error(_bc_msg)
+    elif st.session_state.initial_structure is None:
         st.error("Create a structure first before comparing algorithms.")
     else:
         st.session_state.optimization_running = True
@@ -749,7 +882,9 @@ if run_compare:
                 status_text.text(f"Running {algo_name}...")
                 progress_bar.progress(step_idx / 2)
 
-                # Fresh copy of the initial structure each time
+                # Preserve BCs, then take a fresh copy of the initial topology
+                _sync_boundary_conditions(st.session_state.structure,
+                                          st.session_state.initial_structure)
                 run_struct = st.session_state.initial_structure.snapshot()
                 optimizer = make_opt()
 
