@@ -163,7 +163,7 @@ def generate_report(
         except Exception:
             logger.exception("Report: failed to render energy heatmap")
 
-    # 7. Internal forcess
+    # 7. Internal forces
     if displacement is not None:
         try:
             final_structure.renumber_dofs()
