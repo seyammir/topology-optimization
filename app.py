@@ -130,6 +130,8 @@ def _reset_state() -> None:
     st.session_state.iteration = 0
     st.session_state.comparison_results = {}
     st.session_state.optimization_running = False
+    st.session_state.pop("animation_gif", None)
+    st.session_state.pop("animation_mode", None)
 
 
 def _has_valid_boundary_conditions(struct: Structure) -> bool:
