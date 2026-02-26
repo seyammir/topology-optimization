@@ -115,11 +115,22 @@ if "optimization_running" not in st.session_state:
     st.session_state.optimization_running = False
 if "show_stop_toast" not in st.session_state:
     st.session_state.show_stop_toast = False
+if "step_info_message" not in st.session_state:
+    st.session_state.step_info_message = None
 
 # Show stop toast from previous rerun
 if st.session_state.show_stop_toast:
     st.toast("Optimization stopped.", icon="🔴")
     st.session_state.show_stop_toast = False
+
+# Show single-step info from previous rerun
+if st.session_state.step_info_message is not None:
+    _step_level, _step_msg = st.session_state.step_info_message
+    if _step_level == "success":
+        st.toast(_step_msg, icon="✅")
+    else:
+        st.toast(_step_msg, icon="⚠️")
+    st.session_state.step_info_message = None
 
 
 def _reset_state() -> None:
@@ -130,6 +141,7 @@ def _reset_state() -> None:
     st.session_state.iteration = 0
     st.session_state.comparison_results = {}
     st.session_state.optimization_running = False
+    st.session_state.step_info_message = None
     st.session_state.pop("animation_gif", None)
     st.session_state.pop("animation_mode", None)
 
@@ -869,18 +881,25 @@ if run_step:
             st.session_state.iteration += 1
             algo = st.session_state.algorithm
             if removed == 0 and algo != "SIMP":
-                st.warning("No element could be removed - the structure may already be at its minimum.")
+                st.session_state.step_info_message = (
+                    "warning",
+                    "No element could be removed - the structure may already be at its minimum.",
+                )
             elif algo == "SIMP":
                 dens = getattr(struct, "_simp_densities", {})
                 active = sum(1 for d in dens.values() if d >= 0.1)
-                st.success(
+                st.session_state.step_info_message = (
+                    "success",
                     f"[SIMP] Step {st.session_state.iteration}: "
-                    f"Active Springs: {active}/{len(dens)}"
+                    f"Active Springs: {active}/{len(dens)}",
                 )
                 logger.info("[SIMP] Single step %d: active springs %d/%d",
                             st.session_state.iteration, active, len(dens))
             else:
-                st.success(f"[{algo}] Step {st.session_state.iteration}: {removed} elements removed.")
+                st.session_state.step_info_message = (
+                    "success",
+                    f"[{algo}] Step {st.session_state.iteration}: {removed} elements removed.",
+                )
                 logger.info("[%s] Single step %d: removed %d elements", algo, st.session_state.iteration, removed)
         except ValueError as exc:
             logger.exception("Invalid parameters for single step")
