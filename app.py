@@ -179,9 +179,17 @@ with st.sidebar:
         height = st.number_input("Height (cells)", 2, 60, 10, key="height")
 
     st.subheader("Optimization")
+    _algo_options = ["Node Removal (INR)", "SIMP"]
+    _algo_index = 0
+    _pending = st.session_state.pop("_pending_algorithm", None)
+    if _pending and _pending in _algo_options:
+        _algo_index = _algo_options.index(_pending)
+        # Remove the widget key so Streamlit respects the new index.
+        st.session_state.pop("algorithm", None)
     algorithm = st.selectbox(
         "Algorithm",
-        ["Node Removal (INR)", "SIMP"],
+        _algo_options,
+        index=_algo_index,
         key="algorithm",
         help="Select the topology optimisation algorithm to use.",
     )
@@ -246,7 +254,11 @@ with st.sidebar:
     # Download
     if st.session_state.structure is not None:
         try:
-            json_str = state_to_json_string(st.session_state.structure)
+            json_str = state_to_json_string(
+                st.session_state.structure,
+                result=st.session_state.result,
+                initial_structure=st.session_state.initial_structure,
+            )
             st.download_button(
                 "⬇️ Download State (JSON)",
                 data=json_str,
@@ -272,9 +284,50 @@ with st.sidebar:
     if uploaded is not None:
         try:
             content = uploaded.read().decode("utf-8")
-            st.session_state.structure = structure_from_json_string(content)
-            st.session_state.initial_structure = st.session_state.structure.snapshot()
+            loaded_struct, loaded_result, loaded_initial = structure_from_json_string(content)
+            st.session_state.structure = loaded_struct
+            # Use the saved initial structure if present; otherwise
+            # fall back to a copy of the loaded (current) structure.
+            if loaded_initial is not None:
+                st.session_state.initial_structure = loaded_initial
+            else:
+                st.session_state.initial_structure = loaded_struct.snapshot()
             _reset_state()
+            # Restore optimisation result if present in the file.
+            if loaded_result is not None:
+                st.session_state.result = loaded_result
+                # Queue algorithm selection for next rerun (cannot
+                # modify a widget key after the widget is instantiated).
+                if loaded_result.algorithm == "SIMP":
+                    st.session_state._pending_algorithm = "SIMP"
+                elif loaded_result.algorithm:
+                    st.session_state._pending_algorithm = "Node Removal (INR)"
+                # Re-solve for displacement so all plots work.
+                try:
+                    loaded_struct.renumber_dofs()
+                    solver = FEMSolver()
+                    if loaded_result.algorithm == "SIMP" and loaded_result.densities:
+                        u = solver.solve_with_densities(
+                            loaded_struct, loaded_result.densities,
+                        )
+                        st.session_state.node_energies = (
+                            SIMPOptimizer._compute_node_energies_from_densities(
+                                loaded_struct, u, loaded_result.densities,
+                            )
+                        )
+                    else:
+                        u = solver.solve(loaded_struct)
+                        st.session_state.node_energies = (
+                            TopologyOptimizer._compute_node_energies(
+                                loaded_struct, u,
+                            )
+                        )
+                    st.session_state.displacement = u
+                except Exception:
+                    logger.warning(
+                        "Could not re-solve loaded state; visualisations "
+                        "may be incomplete."
+                    )
             logger.info("State loaded from uploaded file")
             # Set flag to show success message after rerun
             st.session_state.show_upload_success = True

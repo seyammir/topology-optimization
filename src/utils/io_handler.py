@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from ..models.structure import Structure
+from ..solver.optimizer_base import OptimizationResult
 
 logger = logging.getLogger(__name__)
 
@@ -79,23 +80,49 @@ def load_state(filepath: str | Path) -> Structure:
     return Structure.from_dict(data)
 
 
-def state_to_json_string(structure: Structure) -> str:
-    """Return the structure state as a JSON string (for download).
+def state_to_json_string(
+    structure: Structure,
+    result: OptimizationResult | None = None,
+    initial_structure: Structure | None = None,
+) -> str:
+    """Return the structure (and optional result) as a JSON string.
+
+    When *result* is provided the JSON contains both the structure data
+    and the optimisation result under a ``"result"`` key so that the
+    full optimised state survives a round-trip.
+
+    When *initial_structure* is provided it is stored under
+    ``"initial_structure"`` so that the pre-optimisation topology can
+    be restored on load (important for INR where nodes are removed).
 
     Raises
     ------
     TypeError
-        If the structure data is not JSON-serialisable.
+        If the data is not JSON-serialisable.
     """
     try:
-        return json.dumps(structure.to_dict(), indent=2, ensure_ascii=False)
+        data = structure.to_dict()
+        if result is not None:
+            data["result"] = result.to_dict()
+        if initial_structure is not None:
+            data["initial_structure"] = initial_structure.to_dict()
+        return json.dumps(data, indent=2, ensure_ascii=False)
     except (TypeError, ValueError):
         logger.exception("Failed to serialise structure to JSON string")
         raise
 
 
-def structure_from_json_string(json_str: str) -> Structure:
-    """Parse a JSON string back into a :class:`Structure`.
+def structure_from_json_string(
+    json_str: str,
+) -> tuple[Structure, OptimizationResult | None, Structure | None]:
+    """Parse a JSON string back into a :class:`Structure` and optional result.
+
+    Returns
+    -------
+    tuple[Structure, OptimizationResult | None, Structure | None]
+        The current structure, the deserialised optimisation result
+        (if present), and the initial (pre-optimisation) structure
+        (if present).
 
     Raises
     ------
@@ -109,4 +136,11 @@ def structure_from_json_string(json_str: str) -> Structure:
     except json.JSONDecodeError:
         logger.exception("Invalid JSON string provided for structure loading")
         raise
-    return Structure.from_dict(data)
+    struct = Structure.from_dict(data)
+    opt_result: OptimizationResult | None = None
+    if "result" in data:
+        opt_result = OptimizationResult.from_dict(data["result"])
+    initial: Structure | None = None
+    if "initial_structure" in data:
+        initial = Structure.from_dict(data["initial_structure"])
+    return struct, opt_result, initial

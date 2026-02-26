@@ -9,7 +9,7 @@ from __future__ import annotations
 import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Callable
+from typing import Any, Callable
 
 import numpy as np
 
@@ -49,6 +49,76 @@ class OptimizationResult:
     densities: dict[tuple[int, int], float] | None = None
     penalization: float = 3.0
     algorithm: str = ""
+
+    # Serialisation helpers
+    @staticmethod
+    def _key_to_str(key: tuple[int, int]) -> str:
+        return f"{key[0]},{key[1]}"
+
+    @staticmethod
+    def _str_to_key(s: str) -> tuple[int, int]:
+        a, b = s.split(",")
+        return (int(a), int(b))
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialise the result to a JSON-compatible dict."""
+        # Convert density dicts: tuple keys -> string keys
+        def _dens_list(lst: list[dict[tuple[int, int], float]]) -> list[dict[str, float]]:
+            return [
+                {self._key_to_str(k): v for k, v in snap.items()}
+                for snap in lst
+            ]
+
+        data: dict[str, Any] = {
+            "algorithm": self.algorithm,
+            "iterations": self.iterations,
+            "penalization": self.penalization,
+            "compliance_history": list(self.compliance_history),
+        }
+        if self.densities is not None:
+            data["densities"] = {
+                self._key_to_str(k): v for k, v in self.densities.items()
+            }
+        if self.density_history:
+            data["density_history"] = _dens_list(self.density_history)
+        if self.energies_history:
+            data["energies_history"] = [
+                {str(k): v for k, v in snap.items()}
+                for snap in self.energies_history
+            ]
+        if self.history:
+            data["history"] = [s.to_dict() for s in self.history]
+        return data
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "OptimizationResult":
+        """Reconstruct an :class:`OptimizationResult` from a dict."""
+        result = cls(algorithm=data.get("algorithm", ""))
+        result.iterations = data.get("iterations", 0)
+        result.penalization = data.get("penalization", 3.0)
+        result.compliance_history = data.get("compliance_history", [])
+
+        raw_dens = data.get("densities")
+        if raw_dens is not None:
+            result.densities = {
+                cls._str_to_key(k): v for k, v in raw_dens.items()
+            }
+        raw_hist = data.get("density_history")
+        if raw_hist:
+            result.density_history = [
+                {cls._str_to_key(k): v for k, v in snap.items()}
+                for snap in raw_hist
+            ]
+        raw_energies = data.get("energies_history")
+        if raw_energies:
+            result.energies_history = [
+                {int(k): v for k, v in snap.items()}
+                for snap in raw_energies
+            ]
+        raw_history = data.get("history")
+        if raw_history:
+            result.history = [Structure.from_dict(s) for s in raw_history]
+        return result
 
 
 class OptimizerBase(ABC):

@@ -373,10 +373,29 @@ class Structure:
 
     # Serialisation
     def to_dict(self) -> dict[str, Any]:
-        """Serialise the full structure to a JSON-compatible dict."""
+        """Serialise the full structure to a JSON-compatible dict.
+
+        If the structure carries SIMP density state (``_simp_densities``),
+        it is included so that density information survives a
+        save / load round-trip.
+        """
         nodes = [self.get_node(nid).to_dict() for nid in sorted(self.graph.nodes)]
         springs = [s.to_dict() for s in self.get_springs()]
-        return {"nodes": nodes, "springs": springs}
+        data: dict[str, Any] = {"nodes": nodes, "springs": springs}
+
+        # Persist SIMP density data when present.
+        simp_dens = getattr(self, "_simp_densities", None)
+        if simp_dens:
+            # Keys are (int, int) tuples; JSON needs string keys.
+            data["simp_densities"] = {
+                f"{a},{b}": v for (a, b), v in simp_dens.items()
+            }
+        simp_vols = getattr(self, "_simp_spring_volumes", None)
+        if simp_vols:
+            data["simp_spring_volumes"] = {
+                f"{a},{b}": v for (a, b), v in simp_vols.items()
+            }
+        return data
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "Structure":
@@ -414,6 +433,19 @@ class Structure:
             spring = Spring(ni, nj, k=sd.get("k"))
             struct.graph.add_edge(ni.id, nj.id, obj=spring)
         struct.renumber_dofs()
+
+        # Restore SIMP density state if present.
+        if "simp_densities" in data:
+            struct._simp_densities = {  # type: ignore[attr-defined]
+                tuple(int(x) for x in k.split(",")): v
+                for k, v in data["simp_densities"].items()
+            }
+        if "simp_spring_volumes" in data:
+            struct._simp_spring_volumes = {  # type: ignore[attr-defined]
+                tuple(int(x) for x in k.split(",")): v
+                for k, v in data["simp_spring_volumes"].items()
+            }
+
         logger.info(
             "Loaded structure: %d nodes, %d springs",
             struct.num_nodes, struct.graph.number_of_edges(),
