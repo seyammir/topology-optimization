@@ -23,6 +23,19 @@ logger = logging.getLogger(__name__)
 class Visualizer:
     """Static helper methods for plotting structures."""
 
+    @staticmethod
+    def _safe_tight_layout(fig: Figure) -> None:
+        """Call *tight_layout* only when no layout engine is active.
+
+        Avoids the ``UserWarning: The figure layout has changed to tight``
+        that matplotlib emits when *tight_layout* is invoked on a figure
+        that already uses *constrained_layout* (or another engine).
+        """
+        engine = fig.get_layout_engine()
+        # None or PlaceHolderLayoutEngine both mean "no real engine".
+        if engine is None or type(engine).__name__ == "PlaceHolderLayoutEngine":
+            fig.tight_layout()
+
     # Colour palette
     COLOR_NODE = "#2563eb"
     COLOR_SPRING = "#94a3b8"
@@ -228,7 +241,7 @@ class Visualizer:
                 framealpha=0.85, edgecolor="#cccccc", fancybox=True,
             )
 
-        fig.tight_layout()
+        cls._safe_tight_layout(fig)
         return fig
 
     # Heatmap
@@ -344,7 +357,7 @@ class Visualizer:
         ax.set_title(title, fontsize=13, fontweight="bold")
         ax.set_xlabel("x")
         ax.set_ylabel("z")
-        fig.tight_layout()
+        cls._safe_tight_layout(fig)
         return fig
 
     # Black & white density plot
@@ -440,7 +453,7 @@ class Visualizer:
         )
         ax.set_title(title, fontsize=13, fontweight="bold")
         ax.axis("off")
-        fig.tight_layout()
+        cls._safe_tight_layout(fig)
         return fig
 
     # B/W density from SIMP spring densities
@@ -553,7 +566,7 @@ class Visualizer:
         )
         ax.set_title(title, fontsize=13, fontweight="bold")
         ax.axis("off")
-        fig.tight_layout()
+        cls._safe_tight_layout(fig)
         return fig
 
     # Internal forces
@@ -726,7 +739,7 @@ class Visualizer:
             framealpha=0.85, edgecolor="#cccccc", fancybox=True,
         )
 
-        fig.tight_layout()
+        cls._safe_tight_layout(fig)
         return fig
 
     # Export helpers
@@ -1077,7 +1090,7 @@ class Visualizer:
                 bbox=dict(boxstyle="round,pad=0.3", facecolor="white",
                           alpha=0.7, edgecolor="#cccccc"))
 
-        fig.tight_layout()
+        cls._safe_tight_layout(fig)
         return fig
 
     # Comparison panel
@@ -1232,7 +1245,7 @@ class Visualizer:
             )
 
         fig.suptitle("Algorithm Comparison", fontsize=15, fontweight="bold", y=1.02)
-        fig.tight_layout()
+        cls._safe_tight_layout(fig)
         return fig
 
     @classmethod
@@ -1277,5 +1290,5 @@ class Visualizer:
                      fontsize=13, fontweight="bold")
         ax.grid(True, linestyle="--", alpha=0.4)
         ax.legend(fontsize=10, framealpha=0.85, loc="best")
-        fig.tight_layout()
+        cls._safe_tight_layout(fig)
         return fig
