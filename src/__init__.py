@@ -4,4 +4,4 @@ This package provides models, solvers, and utilities for performing
 iterative topology optimisation on 2-D rectangular grid structures.
 """
 
-__version__ = "1.0.0"
+__version__ = "2.0.0"
