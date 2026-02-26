@@ -1234,7 +1234,9 @@ with tab_compare:
 
 # Animation export (if full optimisation was run)
 result: OptimizationResult | None = st.session_state.result
-if result is not None and len(result.history) > 1:
+_has_inr_animation = result is not None and len(result.history) > 1
+_has_simp_animation = result is not None and len(result.density_history) > 1
+if _has_inr_animation or _has_simp_animation:
     st.divider()
     st.subheader("🎬 Optimization Animation")
 
@@ -1256,12 +1258,21 @@ if result is not None and len(result.history) > 1:
     if st.button("🎞️ Generate Animation (GIF)", width='content', key="gen_anim"):
         try:
             with st.spinner("Rendering animation frames..."):
-                gif_bytes = Visualizer.create_animation_gif(
-                    result.history,
-                    initial_structure=st.session_state.initial_structure,
-                    mode=mode_key,
-                    duration_ms=anim_speed,
-                )
+                if _has_simp_animation:
+                    gif_bytes = Visualizer.create_simp_animation_gif(
+                        st.session_state.structure,
+                        result.density_history,
+                        initial_structure=st.session_state.initial_structure,
+                        mode=mode_key,
+                        duration_ms=anim_speed,
+                    )
+                else:
+                    gif_bytes = Visualizer.create_animation_gif(
+                        result.history,
+                        initial_structure=st.session_state.initial_structure,
+                        mode=mode_key,
+                        duration_ms=anim_speed,
+                    )
             st.session_state["animation_gif"] = gif_bytes
             st.session_state["animation_mode"] = mode_key
         except Exception:

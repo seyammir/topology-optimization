@@ -136,3 +136,18 @@ class TestSIMPFullOptimization:
         opt.optimize(struct)
         assert struct.num_nodes == initial_nodes
         assert struct.graph.number_of_edges() == initial_springs
+
+    def test_density_history_populated(self):
+        """optimize() records one density snapshot per iteration."""
+        struct = create_mbb_beam(nx=4, nz=2, half=True)
+        opt = SIMPOptimizer(
+            target_mass_fraction=0.5,
+            max_iterations=10,
+        )
+        result = opt.optimize(struct)
+        assert len(result.density_history) == result.iterations
+        # Each snapshot should have the same keys as the final densities
+        for snap in result.density_history:
+            assert set(snap.keys()) == set(result.densities.keys())
+            for xe in snap.values():
+                assert 0.0 <= xe <= 1.0 + 1e-12

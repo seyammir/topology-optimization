@@ -44,6 +44,7 @@ class OptimizationResult:
     history: list[Structure] = field(default_factory=list)
     energies_history: list[dict[int, float]] = field(default_factory=list)
     compliance_history: list[float] = field(default_factory=list)
+    density_history: list[dict[tuple[int, int], float]] = field(default_factory=list)
     iterations: int = 0
     densities: dict[tuple[int, int], float] | None = None
     penalization: float = 3.0

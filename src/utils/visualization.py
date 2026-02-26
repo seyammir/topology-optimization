@@ -839,6 +839,114 @@ class Visualizer:
             logger.exception("Failed to create animation GIF")
             raise RuntimeError("Could not create the animation GIF") from None
 
+    @classmethod
+    def create_simp_animation_gif(
+        cls,
+        structure: Structure,
+        density_history: list[dict[tuple[int, int], float]],
+        initial_structure: Structure | None = None,
+        mode: str = "bw",
+        duration_ms: int = 300,
+        loop: int = 0,
+    ) -> bytes:
+        """Create an animated GIF from SIMP density evolution.
+
+        Parameters
+        ----------
+        structure : Structure
+            The structure (unchanged throughout SIMP).
+        density_history : list[dict]
+            Per-iteration density snapshots.
+        initial_structure : Structure, optional
+            The original grid structure for reference dimensions.
+        mode : str
+            ``"bw"`` for black-and-white density frames,
+            ``"structure"`` for wireframe with density-based thickness.
+        duration_ms : int
+            Duration of each frame in milliseconds.
+        loop : int
+            Number of times to loop (0 = infinite).
+
+        Returns
+        -------
+        bytes
+            The GIF file content.
+
+        Raises
+        ------
+        ValueError
+            If *density_history* is empty.
+        RuntimeError
+            If the GIF cannot be rendered.
+        """
+        if not density_history:
+            raise ValueError("density_history must contain at least one snapshot")
+
+        ref = initial_structure if initial_structure is not None else structure
+        frames: list[Image.Image] = []
+
+        # Sample frames if there are too many iterations (cap at ~60 frames)
+        max_frames = 60
+        total = len(density_history)
+        if total > max_frames:
+            step = total / max_frames
+            indices = [int(i * step) for i in range(max_frames)]
+            # Always include the last frame
+            if indices[-1] != total - 1:
+                indices.append(total - 1)
+        else:
+            indices = list(range(total))
+
+        try:
+            for frame_num, idx in enumerate(indices):
+                dens = density_history[idx]
+                iteration = idx + 1
+                if mode == "bw":
+                    fig = cls.plot_bw_density_from_springs(
+                        structure,
+                        dens,
+                        initial_structure=ref,
+                        title=f"Iteration {iteration}",
+                    )
+                else:
+                    fig = cls.plot_structure(
+                        structure,
+                        title=f"Iteration {iteration}",
+                        densities=dens,
+                    )
+
+                # Render figure to PIL Image
+                buf = io.BytesIO()
+                fig.savefig(buf, format="png", dpi=100, bbox_inches="tight")
+                plt.close(fig)
+                buf.seek(0)
+                img = Image.open(buf).convert("RGBA")
+                # Composite onto white background for GIF compatibility
+                background = Image.new("RGBA", img.size, (255, 255, 255, 255))
+                background.paste(img, mask=img)
+                frames.append(background.convert("RGB"))
+
+            # Hold the last frame longer
+            durations = [duration_ms] * len(frames)
+            if len(durations) > 1:
+                durations[-1] = duration_ms * 4
+
+            out = io.BytesIO()
+            frames[0].save(
+                out,
+                format="GIF",
+                save_all=True,
+                append_images=frames[1:],
+                duration=durations,
+                loop=loop,
+            )
+            out.seek(0)
+            logger.info("Created SIMP animation GIF with %d frames", len(frames))
+            return out.read()
+        except Exception:
+            logger.exception("Failed to create SIMP animation GIF")
+            raise RuntimeError("Could not create the SIMP animation GIF") from None
+
     @staticmethod
     def export_image(fig: Figure, path: str) -> None:
         """Save figure to disk.

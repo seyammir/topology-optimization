@@ -133,6 +133,9 @@ class SIMPOptimizer(OptimizerBase):
             )
             result.energies_history.append(node_energies)
 
+            # Record density snapshot for animation
+            result.density_history.append(dict(densities))
+
             # Convergence check
             max_change = max(
                 abs(densities[k] - old_densities[k]) for k in densities
