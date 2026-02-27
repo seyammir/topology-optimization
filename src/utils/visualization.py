@@ -23,6 +23,19 @@ logger = logging.getLogger(__name__)
 class Visualizer:
     """Static helper methods for plotting structures."""
 
+    @staticmethod
+    def _safe_tight_layout(fig: Figure) -> None:
+        """Call *tight_layout* only when no layout engine is active.
+
+        Avoids the ``UserWarning: The figure layout has changed to tight``
+        that matplotlib emits when *tight_layout* is invoked on a figure
+        that already uses *constrained_layout* (or another engine).
+        """
+        engine = fig.get_layout_engine()
+        # None or PlaceHolderLayoutEngine both mean "no real engine".
+        if engine is None or type(engine).__name__ == "PlaceHolderLayoutEngine":
+            fig.tight_layout()
+
     # Colour palette
     COLOR_NODE = "#2563eb"
     COLOR_SPRING = "#94a3b8"
@@ -228,7 +241,7 @@ class Visualizer:
                 framealpha=0.85, edgecolor="#cccccc", fancybox=True,
             )
 
-        fig.tight_layout()
+        cls._safe_tight_layout(fig)
         return fig
 
     # Heatmap
@@ -344,7 +357,7 @@ class Visualizer:
         ax.set_title(title, fontsize=13, fontweight="bold")
         ax.set_xlabel("x")
         ax.set_ylabel("z")
-        fig.tight_layout()
+        cls._safe_tight_layout(fig)
         return fig
 
     # Black & white density plot
@@ -440,7 +453,7 @@ class Visualizer:
         )
         ax.set_title(title, fontsize=13, fontweight="bold")
         ax.axis("off")
-        fig.tight_layout()
+        cls._safe_tight_layout(fig)
         return fig
 
     # B/W density from SIMP spring densities
@@ -501,38 +514,50 @@ class Visualizer:
 
         n_cells_x = len(xs_sorted) - 1
         n_cells_z = len(zs_sorted) - 1
-        density_img = np.zeros((n_cells_z, n_cells_x))
 
-        for iz in range(n_cells_z):
-            for ix in range(n_cells_x):
-                # Four corner positions
-                corners = [
-                    (xs_sorted[ix],     zs_sorted[iz]),
-                    (xs_sorted[ix + 1], zs_sorted[iz]),
-                    (xs_sorted[ix],     zs_sorted[iz + 1]),
-                    (xs_sorted[ix + 1], zs_sorted[iz + 1]),
-                ]
-                corner_ids = [pos_to_id.get(c) for c in corners]
+        # Pre-compute the full node-id grid for fast edge lookups.
+        # id_grid[iz][ix] is the node id at (xs_sorted[ix], zs_sorted[iz]).
+        xs_arr = np.array(xs_sorted)
+        zs_arr = np.array(zs_sorted)
+        id_grid = np.full((len(zs_arr), len(xs_arr)), -1, dtype=np.intp)
+        x_idx = {x: i for i, x in enumerate(xs_sorted)}
+        z_idx = {z: i for i, z in enumerate(zs_sorted)}
+        for n in nodes:
+            ix_n = x_idx.get(n.x)
+            iz_n = z_idx.get(n.z)
+            if ix_n is not None and iz_n is not None:
+                id_grid[iz_n, ix_n] = n.id
 
-                # Collect densities of edges forming this cell
-                edge_densities = []
-                # 4 edges: top, bottom, left, right
-                edges = [
-                    (corner_ids[0], corner_ids[1]),  # top
-                    (corner_ids[2], corner_ids[3]),  # bottom
-                    (corner_ids[0], corner_ids[2]),  # left
-                    (corner_ids[1], corner_ids[3]),  # right
-                ]
-                for e in edges:
-                    if e[0] is not None and e[1] is not None:
-                        d = dens_lookup.get(e, dens_lookup.get((e[1], e[0])))
-                        if d is not None:
-                            edge_densities.append(d)
+        # Vectorised density image: accumulate edge densities per cell
+        density_sum = np.zeros((n_cells_z, n_cells_x))
+        density_cnt = np.zeros((n_cells_z, n_cells_x), dtype=np.int32)
 
-                if edge_densities:
-                    density_img[iz, ix] = sum(edge_densities) / len(edge_densities)
-                else:
-                    density_img[iz, ix] = 0.0
+        def _add_edge(ni_arr: np.ndarray, nj_arr: np.ndarray) -> None:
+            """Add density contributions for a whole grid of edges."""
+            valid = (ni_arr >= 0) & (nj_arr >= 0)
+            izs, ixs = np.nonzero(valid)
+            for iz, ix in zip(izs, ixs):
+                ni, nj = int(ni_arr[iz, ix]), int(nj_arr[iz, ix])
+                d = dens_lookup.get((ni, nj))
+                if d is not None:
+                    density_sum[iz, ix] += d
+                    density_cnt[iz, ix] += 1
+
+        # Corner node-id sub-grids (shape = n_cells_z × n_cells_x)
+        tl = id_grid[:-1, :-1]   # top-left
+        tr = id_grid[:-1, 1:]    # top-right
+        bl = id_grid[1:, :-1]    # bottom-left
+        br = id_grid[1:, 1:]     # bottom-right
+
+        _add_edge(tl, tr)  # top horizontal
+        _add_edge(bl, br)  # bottom horizontal
+        _add_edge(tl, bl)  # left vertical
+        _add_edge(tr, br)  # right vertical
+
+        with np.errstate(invalid="ignore"):
+            density_img = np.where(
+                density_cnt > 0, density_sum / density_cnt, 0.0
+            )
 
         if ax is None:
             aspect = n_cells_x / max(n_cells_z, 1)
@@ -553,7 +578,7 @@ class Visualizer:
         )
         ax.set_title(title, fontsize=13, fontweight="bold")
         ax.axis("off")
-        fig.tight_layout()
+        cls._safe_tight_layout(fig)
         return fig
 
     # Internal forces
@@ -726,7 +751,7 @@ class Visualizer:
             framealpha=0.85, edgecolor="#cccccc", fancybox=True,
         )
 
-        fig.tight_layout()
+        cls._safe_tight_layout(fig)
         return fig
 
     # Export helpers
@@ -793,30 +818,50 @@ class Visualizer:
         ref = initial_structure if initial_structure is not None else history[0]
         frames: list[Image.Image] = []
 
+        # Cap total frames to avoid excessive rendering time
+        max_frames = 60
+        total = len(history)
+        if total > max_frames:
+            step = total / max_frames
+            indices = [int(i * step) for i in range(max_frames)]
+            if indices[-1] != total - 1:
+                indices.append(total - 1)
+        else:
+            indices = list(range(total))
+
         try:
-            for idx, snap in enumerate(history):
+            # Reuse a single figure/axes across all frames
+            reuse_fig, reuse_ax = plt.subplots(figsize=(10, 6))
+
+            for frame_num, idx in enumerate(indices):
+                reuse_ax.clear()
+                snap = history[idx]
                 if mode == "bw":
                     fig = cls.plot_bw_density(
                         snap,
                         initial_structure=ref,
                         title=f"Iteration {idx}",
+                        ax=reuse_ax,
                     )
                 else:
                     fig = cls.plot_structure(
                         snap,
                         title=f"Iteration {idx}",
+                        ax=reuse_ax,
                     )
 
-                # Render figure to PIL Image
+                # Render figure to PIL Image — lower dpi and skip
+                # bbox_inches='tight' (avoids costly trial render).
                 buf = io.BytesIO()
-                fig.savefig(buf, format="png", dpi=100, bbox_inches="tight")
-                plt.close(fig)
+                fig.savefig(buf, format="png", dpi=72)
                 buf.seek(0)
                 img = Image.open(buf).convert("RGBA")
                 # Composite onto white background for GIF compatibility
                 background = Image.new("RGBA", img.size, (255, 255, 255, 255))
                 background.paste(img, mask=img)
                 frames.append(background.convert("RGB"))
+
+            plt.close(reuse_fig)
 
             # Hold the last frame longer
             durations = [duration_ms] * len(frames)
@@ -898,7 +943,12 @@ class Visualizer:
             indices = list(range(total))
 
         try:
+            # Reuse a single figure/axes across all frames to avoid
+            # repeated figure-creation overhead.
+            reuse_fig, reuse_ax = plt.subplots(figsize=(10, 6))
+
             for frame_num, idx in enumerate(indices):
+                reuse_ax.clear()
                 dens = density_history[idx]
                 iteration = idx + 1
                 if mode == "bw":
@@ -907,24 +957,28 @@ class Visualizer:
                         dens,
                         initial_structure=ref,
                         title=f"Iteration {iteration}",
+                        ax=reuse_ax,
                     )
                 else:
                     fig = cls.plot_structure(
                         structure,
                         title=f"Iteration {iteration}",
                         densities=dens,
+                        ax=reuse_ax,
                     )
 
-                # Render figure to PIL Image
+                # Render figure to PIL Image — use lower dpi and skip
+                # bbox_inches='tight' (requires a costly trial render).
                 buf = io.BytesIO()
-                fig.savefig(buf, format="png", dpi=100, bbox_inches="tight")
-                plt.close(fig)
+                fig.savefig(buf, format="png", dpi=72)
                 buf.seek(0)
                 img = Image.open(buf).convert("RGBA")
                 # Composite onto white background for GIF compatibility
                 background = Image.new("RGBA", img.size, (255, 255, 255, 255))
                 background.paste(img, mask=img)
                 frames.append(background.convert("RGB"))
+
+            plt.close(reuse_fig)
 
             # Hold the last frame longer
             durations = [duration_ms] * len(frames)
@@ -1077,7 +1131,7 @@ class Visualizer:
                 bbox=dict(boxstyle="round,pad=0.3", facecolor="white",
                           alpha=0.7, edgecolor="#cccccc"))
 
-        fig.tight_layout()
+        cls._safe_tight_layout(fig)
         return fig
 
     # Comparison panel
@@ -1232,7 +1286,7 @@ class Visualizer:
             )
 
         fig.suptitle("Algorithm Comparison", fontsize=15, fontweight="bold", y=1.02)
-        fig.tight_layout()
+        cls._safe_tight_layout(fig)
         return fig
 
     @classmethod
@@ -1277,5 +1331,5 @@ class Visualizer:
                      fontsize=13, fontweight="bold")
         ax.grid(True, linestyle="--", alpha=0.4)
         ax.legend(fontsize=10, framealpha=0.85, loc="best")
-        fig.tight_layout()
+        cls._safe_tight_layout(fig)
         return fig
