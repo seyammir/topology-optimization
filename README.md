@@ -10,7 +10,7 @@
 > finite-element method with **Iterative Node Removal (INR)** and
 > **SIMP** (Solid Isotropic Material with Penalization) algorithms,
 > implemented in Python with a Streamlit web UI.  
-> **Version 2.0.0**
+> **Version 2.0.1**
 
 ---
 
